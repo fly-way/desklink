@@ -3,9 +3,9 @@ import type { Server as HttpServer } from 'node:http';
 import type { CommanderRuntime } from './commander.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { toNodeHandler } from '@modelcontextprotocol/node';
+import type { McpHttpHandler, Tool } from '@modelcontextprotocol/server';
+import { createDeskLinkMcpHandler } from './mcp-handler.js';
 import { ProxyStatus, ToolSummary } from '../shared/types.js';
 
 
@@ -19,8 +19,9 @@ export class McpProxy {
   private client: Client | null = null;
   private transport: StdioClientTransport | null = null;
   private http: HttpServer | null = null;
+  private mcpHandler: McpHttpHandler | null = null;
   // Full tool definitions (name, description, inputSchema, …) passed through to the tunnel.
-  private tools: any[] = [];
+  private tools: Tool[] = [];
   private commanderVersion = '';
   private commanderLatest = '';
   private phase: ProxyStatus['phase'] = 'idle';
@@ -97,6 +98,8 @@ export class McpProxy {
       this.http.closeAllConnections?.();
     });
     this.http = null;
+    if (this.mcpHandler) await this.mcpHandler.close().catch(() => {});
+    this.mcpHandler = null;
     if (this.client) await this.client.close().catch(() => {});
     this.client = null;
     this.transport = null;
@@ -112,23 +115,23 @@ export class McpProxy {
     app.disable('x-powered-by');
     app.use(express.json({ limit: '8mb' }));
 
-    app.post('/mcp', async (req, res) => {
+    this.mcpHandler = createDeskLinkMcpHandler({
+      getTools: () => this.tools,
+      callTool: async params => {
+        if (!this.client) throw new Error('Desktop Commander is not running.');
+        return await this.client.callTool(params as any) as any;
+      },
+      onError: error => this.onLog(`MCP request error: ${error.message}\n`)
+    });
+    const handleMcpRequest = toNodeHandler(this.mcpHandler, {
+      maxRequestBodySize: 8 * 1024 * 1024,
+      onerror: error => this.onLog(`MCP HTTP error: ${error.message}\n`)
+    });
+
+    app.all('/mcp', async (req, res) => {
       const hosts = [`127.0.0.1:${this.port}`, `localhost:${this.port}`];
       if (!req.headers.host || !hosts.includes(req.headers.host)) return res.status(403).json({ error: 'Loopback only.' });
-
-      const server = new Server({ name: 'desklink', version: '0.1.0' }, { capabilities: { tools: {} } });
-      server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: this.tools }));
-      server.setRequestHandler(CallToolRequestSchema, async request => {
-        if (!this.client) throw new Error('Desktop Commander is not running.');
-        const result = await this.client.callTool(request.params as any);
-        return result as any;
-      });
-
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
-      res.on('close', () => { void transport.close().catch(() => {}); });
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
-      await server.close().catch(() => {});
+      await handleMcpRequest(req, res, req.body);
     });
 
     // tunnel-client probes OAuth metadata during startup. Without this it receives Express'
