@@ -22,6 +22,7 @@ export class McpProxy {
   private mcpHandler: McpHttpHandler | null = null;
   // Full tool definitions (name, description, inputSchema, …) passed through to the tunnel.
   private tools: Tool[] = [];
+  private proxiesResources = false;
   private commanderVersion = '';
   private commanderLatest = '';
   private phase: ProxyStatus['phase'] = 'idle';
@@ -58,6 +59,7 @@ export class McpProxy {
         ...tool,
         inputSchema: (tool as any).inputSchema ?? { type: 'object', properties: {} }
       }));
+      this.proxiesResources = Boolean(client.getServerCapabilities()?.resources);
       this.client = client;
       // The MCP handshake reports the exact server implementation that answered.
       const info = client.getServerVersion();
@@ -103,6 +105,7 @@ export class McpProxy {
     if (this.client) await this.client.close().catch(() => {});
     this.client = null;
     this.transport = null;
+    this.proxiesResources = false;
     this.emit('idle', '已停止');
   }
 
@@ -121,6 +124,16 @@ export class McpProxy {
         if (!this.client) throw new Error('Desktop Commander is not running.');
         return await this.client.callTool(params as any) as any;
       },
+      ...(this.proxiesResources ? {
+        listResources: async (params: any) => {
+          if (!this.client) throw new Error('Desktop Commander is not running.');
+          return await this.client.listResources(params) as any;
+        },
+        readResource: async (params: any) => {
+          if (!this.client) throw new Error('Desktop Commander is not running.');
+          return await this.client.readResource(params) as any;
+        }
+      } : {}),
       onError: error => this.onLog(`MCP request error: ${error.message}\n`)
     });
     const handleMcpRequest = toNodeHandler(this.mcpHandler, {

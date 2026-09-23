@@ -6,11 +6,19 @@ const protocolVersion = '2026-07-28';
 const tools = [{
   name: 'echo',
   description: 'Echoes text.',
+  _meta: {
+    'ui/resourceUri': 'ui://desklink/echo'
+  },
   inputSchema: {
     type: 'object',
     properties: { text: { type: 'string' } },
     required: ['text']
   }
+}];
+const resources = [{
+  uri: 'ui://desklink/echo',
+  name: 'Echo UI',
+  mimeType: 'text/html;profile=mcp-app'
 }];
 
 function modernRequest(method, params = {}) {
@@ -21,6 +29,7 @@ function modernRequest(method, params = {}) {
     'mcp-protocol-version': protocolVersion
   };
   if (method === 'tools/call') headers['mcp-name'] = params.name;
+  if (method === 'resources/read') headers['mcp-name'] = params.uri;
 
   return new Request('http://localhost/mcp', {
     method: 'POST',
@@ -41,13 +50,25 @@ function modernRequest(method, params = {}) {
   });
 }
 
-test('serves MCP 2026 discovery, tools/list, and tools/call', async t => {
+test('serves MCP 2026 tools and their linked UI resources', async t => {
   let callParams;
+  let readParams;
   const handler = createDeskLinkMcpHandler({
     getTools: () => tools,
     callTool: async params => {
       callParams = params;
       return { content: [{ type: 'text', text: params.arguments.text }] };
+    },
+    listResources: async () => ({ resources }),
+    readResource: async params => {
+      readParams = params;
+      return {
+        contents: [{
+          uri: params.uri,
+          mimeType: 'text/html;profile=mcp-app',
+          text: '<p>Echo</p>'
+        }]
+      };
     }
   });
   t.after(() => handler.close());
@@ -56,7 +77,7 @@ test('serves MCP 2026 discovery, tools/list, and tools/call', async t => {
   assert.equal(discoverResponse.status, 200);
   const discover = await discoverResponse.json();
   assert.deepEqual(discover.result.supportedVersions, [protocolVersion]);
-  assert.deepEqual(discover.result.capabilities, { tools: {} });
+  assert.deepEqual(discover.result.capabilities, { tools: {}, resources: {} });
   assert.equal(discover.result.resultType, 'complete');
   assert.equal(discover.result.ttlMs, 0);
   assert.equal(discover.result.cacheScope, 'private');
@@ -80,6 +101,25 @@ test('serves MCP 2026 discovery, tools/list, and tools/call', async t => {
   assert.deepEqual(callParams, { name: 'echo', arguments: { text: 'hello' } });
   assert.deepEqual(called.result.content, [{ type: 'text', text: 'hello' }]);
   assert.equal(called.result.resultType, 'complete');
+
+  const resourcesResponse = await handler.fetch(modernRequest('resources/list'));
+  assert.equal(resourcesResponse.status, 200);
+  const listedResources = await resourcesResponse.json();
+  assert.deepEqual(listedResources.result.resources, resources);
+  assert.equal(listedResources.result.resultType, 'complete');
+
+  const readResponse = await handler.fetch(modernRequest('resources/read', {
+    uri: 'ui://desklink/echo'
+  }));
+  assert.equal(readResponse.status, 200);
+  const read = await readResponse.json();
+  assert.deepEqual(readParams, { uri: 'ui://desklink/echo' });
+  assert.deepEqual(read.result.contents, [{
+    uri: 'ui://desklink/echo',
+    mimeType: 'text/html;profile=mcp-app',
+    text: '<p>Echo</p>'
+  }]);
+  assert.equal(read.result.resultType, 'complete');
 });
 
 test('keeps the stateless MCP 2025 initialize flow working', async t => {
