@@ -18,6 +18,8 @@ let logs = '';
 let tools = [];
 let diagnosis = null;
 let current = 'overview';
+/** True while a tunnel action (connect/install/stop) is awaiting a remote response. */
+let tunnelBusy = false;
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -147,11 +149,21 @@ function renderTunnel() {
   form.append(proxyRow);
   wrap.append(section('凭据', form));
 
+  // Daemon is up but the control plane has not acknowledged the key yet: keep actions locked
+  // for a grace window so a slow/uncertain remote answer can't be disturbed by local edits.
+  const waiting = tunnel.running && tunnel.ready && !tunnel.connected && !tunnel.lastError
+    && Date.now() - (tunnel.startedAt || 0) < 90000;
+
   const rows = el('div', 'rows');
   rows.append(row('tunnel-client', tunnel.installed ? tunnel.version || '已安装' : '未安装'));
   rows.append(row('进程', tunnel.running ? '运行中' : '已停止'));
   rows.append(row('健康', tunnel.live ? '在线' : '—'));
-  rows.append(row('就绪', tunnel.connected ? 'Ready' : tunnel.ready ? '等待控制面' : '—'));
+  const readyRow = el('div', 'row');
+  readyRow.append(el('div', 'row-label', '就绪'));
+  const readyValue = el('div', 'row-value', tunnel.connected ? 'Ready' : tunnel.ready ? '等待控制面' : '—');
+  if (waiting) readyValue.classList.add('waiting-dots');
+  readyRow.append(readyValue);
+  rows.append(readyRow);
   if (tunnel.running) {
     const cp = tunnel.controlPlane || { ok: false, detail: '' };
     const line = el('div', 'row');
@@ -173,37 +185,61 @@ function renderTunnel() {
     wrap.append(note);
   }
 
+  // Locked while an operation is in flight, while installing, or while the control plane has
+  // not answered within the grace window — so local actions can't race the remote response.
+  const lock = tunnelBusy || tunnel.installing || waiting;
+
   const bar = el('div', 'toolbar');
-  bar.append(button(tunnel.installed ? '更新 tunnel-client' : '安装 tunnel-client', async () => {
-    const result = await bridge.tunnelInstall();
-    if (result?.error) throw new Error(result.error);
-    tunnel.lastError = '';
+  const installBtn = button(tunnel.installed ? '更新 tunnel-client' : '安装 tunnel-client', async () => {
+    tunnelBusy = true;
     show(current);
-    return 'tunnel-client 已更新';
-  }, '下载中…'));
+    try {
+      const result = await bridge.tunnelInstall();
+      if (result?.error) throw new Error(result.error);
+      tunnel.lastError = '';
+      show(current);
+      return 'tunnel-client 已更新';
+    } finally {
+      tunnelBusy = false;
+      show(current);
+    }
+  }, '下载中…');
+  installBtn.disabled = lock;
+  bar.append(installBtn);
 
   const connect = el('button', 'btn btn-default', '连接并启动');
-  connect.disabled = !tunnel.installed;
+  connect.disabled = !tunnel.installed || lock;
   connect.addEventListener('click', async () => {
-    connect.disabled = true;
+    const payload = {
+      tunnelId: document.getElementById('tunnelId').value.trim(),
+      apiKey: document.getElementById('runtimeKey').value.trim(),
+      proxy: document.getElementById('proxy').value.trim()
+    };
+    tunnelBusy = true;
+    show(current);
     try {
-      const result = await bridge.tunnelConnect({
-        tunnelId: document.getElementById('tunnelId').value.trim(),
-        apiKey: document.getElementById('runtimeKey').value.trim(),
-        proxy: document.getElementById('proxy').value.trim()
-      });
+      const result = await bridge.tunnelConnect(payload);
       if (result?.error) tunnel.lastError = result.error;
     } finally {
-      connect.disabled = false;
+      tunnelBusy = false;
       show(current);
     }
   });
   bar.append(connect);
 
-  bar.append(button('停止', async () => {
-    await bridge.tunnelStop();
-    return '已停止 tunnel-client';
-  }));
+  const stop = button('停止', async () => {
+    tunnelBusy = true;
+    show(current);
+    try {
+      await bridge.tunnelStop();
+      return '已停止 tunnel-client';
+    } finally {
+      tunnelBusy = false;
+      show(current);
+    }
+  });
+  stop.disabled = lock;
+  bar.append(stop);
   bar.append(el('span', 'spacer'));
   wrap.append(bar);
   return wrap;
@@ -370,7 +406,8 @@ function updateTitleStatus() {
   const ready = status.phase === 'ready' && tunnel.connected;
   const connecting = status.phase === 'ready' && tunnel.running && !tunnel.connected && tunnel.ready;
   dot.className = 'status-dot' + (ready ? ' is-ready' : connecting ? ' is-live is-pulsing' : status.phase === 'ready' || tunnel.live ? ' is-live' : status.phase === 'error' ? ' is-error' : '');
-  text.textContent = ready ? '已就绪' : connecting ? '正在连接控制面…' : tunnel.connected ? '隧道已就绪' : status.detail || phaseText[status.phase];
+  text.classList.toggle('waiting-dots', connecting);
+  text.textContent = ready ? '已就绪' : connecting ? '正在连接控制面' : tunnel.connected ? '隧道已就绪' : status.detail || phaseText[status.phase];
 }
 
 async function loadTools() {

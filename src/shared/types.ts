@@ -37,6 +37,8 @@ export type TunnelStatus = {
   controlPlane: { ok: boolean; detail: string; at: number };
   /** Outbound proxy configured for tunnel-client, surfaced so the form can prefill it. */
   proxy: string;
+  /** Epoch ms when the current tunnel-client process was spawned (0 when not running). */
+  startedAt: number;
   tunnelId: string;
   hasKey: boolean;
   lastError: string;

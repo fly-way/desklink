@@ -239,6 +239,7 @@ export class TunnelRuntime {
       connected,
       controlPlane: { ok: cp.ok, detail: cp.detail, at: this.probe.at },
       proxy: this.store.config.proxy || '',
+      startedAt: this.startedAt,
       tunnelId: this.store.tunnelId,
       hasKey: this.store.hasApiKey(),
       lastError: this.authError || this.netError || (stalled ? '控制面尚未连接：请确认 Tunnel ID 与 Runtime API Key 正确，且本组织已启用 Secure MCP Tunnel；若网络需代理，请在凭据下方填写代理端口。' : ''),

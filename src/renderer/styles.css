@@ -126,6 +126,22 @@ body { display: flex; flex-direction: column; user-select: none; }
 .status-dot.is-pulsing { animation: dotPulse 1.2s ease-in-out infinite; }
 @keyframes dotPulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
 
+/* Animated ellipsis for in-progress states, e.g. waiting for the control plane to answer. */
+.waiting-dots::after {
+  display: inline-block;
+  width: 1.1em;
+  text-align: left;
+  content: '';
+  animation: waitingDots 1.2s infinite;
+}
+@keyframes waitingDots {
+  0% { content: ''; }
+  25% { content: '.'; }
+  50% { content: '..'; }
+  75% { content: '...'; }
+  100% { content: '...'; }
+}
+
 /* ---------- split view ---------- */
 .split { flex: 1; display: flex; min-height: 0; }
 
