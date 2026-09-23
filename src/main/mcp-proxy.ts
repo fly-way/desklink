@@ -19,7 +19,8 @@ export class McpProxy {
   private client: Client | null = null;
   private transport: StdioClientTransport | null = null;
   private http: HttpServer | null = null;
-  private tools: ToolSummary[] = [];
+  // Full tool definitions (name, description, inputSchema, …) passed through to the tunnel.
+  private tools: any[] = [];
   private commanderVersion = '';
   private commanderLatest = '';
   private phase: ProxyStatus['phase'] = 'idle';
@@ -50,7 +51,12 @@ export class McpProxy {
     try {
       await client.connect(this.transport);
       const listed = await client.listTools();
-      this.tools = listed.tools.map(tool => ({ name: tool.name, description: tool.description ?? '' }));
+      // Mirror the full tool definitions. ChatGPT's MCP validation requires an inputSchema
+      // on every tool, so preserve it (and synthesize an empty one if a tool omits it).
+      this.tools = listed.tools.map(tool => ({
+        ...tool,
+        inputSchema: (tool as any).inputSchema ?? { type: 'object', properties: {} }
+      }));
       this.client = client;
       // The MCP handshake reports the exact server implementation that answered.
       const info = client.getServerVersion();
@@ -98,7 +104,7 @@ export class McpProxy {
   }
 
   listTools(): ToolSummary[] {
-    return this.tools;
+    return this.tools.map(t => ({ name: t.name, description: (t.description ?? '') as string }));
   }
 
   private async listen(): Promise<void> {

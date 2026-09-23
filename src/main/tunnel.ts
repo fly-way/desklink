@@ -24,8 +24,10 @@ export class TunnelRuntime {
   private message = '';
   /** Last credential rejection reported by the daemon, if any. */
   private authError = '';
+  /** Last network-unreachable signal (e.g. no proxy), as opposed to a credential rejection. */
+  private netError = '';
   /** Cached result of the (expensive) control-plane poll probe. */
-  private probe: { at: number; value: boolean } = { at: 0, value: false };
+  private probe: { at: number; value: { ok: boolean; detail: string } } = { at: 0, value: { ok: false, detail: '' } };
   /** Guards against overlapping start() calls while waiting for the upstream. */
   private starting = false;
   /** When the current daemon was spawned, used to flag a stalled control-plane handshake. */
@@ -100,8 +102,8 @@ export class TunnelRuntime {
     }
   }
 
-  async configure(tunnelId: string, apiKey: string): Promise<void> {
-    this.store.saveConfig({ tunnelId: tunnelId.trim() });
+  async configure(tunnelId: string, apiKey: string, proxy?: string): Promise<void> {
+    this.store.saveConfig({ tunnelId: tunnelId.trim(), proxy: proxy?.trim() || undefined });
     if (apiKey) this.store.setApiKey(apiKey.trim());
     this.emit('凭据已保存。');
   }
@@ -112,7 +114,8 @@ export class TunnelRuntime {
     try {
       if (!this.isInstalled()) await this.install();
       this.authError = '';
-      this.probe = { at: 0, value: false };
+      this.netError = '';
+      this.probe = { at: 0, value: { ok: false, detail: '' } };
       const apiKey = this.store.getApiKey();
       const tunnelId = this.store.tunnelId;
       if (!tunnelId) throw new Error('Tunnel ID 未配置。');
@@ -121,12 +124,22 @@ export class TunnelRuntime {
       await this.waitForUpstream();
 
       const target = `http://127.0.0.1:${this.store.config.mcpPort}/mcp`;
-      const child = spawn(this.executable, [
+      const proxy = this.normalizeProxy(this.store.config.proxy);
+      const args = [
         'run',
         '--mcp.server-url', target,
         '--health.listen-addr', `127.0.0.1:${this.store.config.healthPort}`
-      ], {
-        env: { ...process.env, CONTROL_PLANE_API_KEY: apiKey, CONTROL_PLANE_TUNNEL_ID: tunnelId },
+      ];
+      const env: NodeJS.ProcessEnv = { ...process.env, CONTROL_PLANE_API_KEY: apiKey, CONTROL_PLANE_TUNNEL_ID: tunnelId };
+      if (proxy) {
+        args.push('--http-proxy', proxy);
+        env.HTTP_PROXY = proxy;
+        env.HTTPS_PROXY = proxy;
+        env.CONTROL_PLANE_HTTP_PROXY = proxy;
+        this.log(`using outbound proxy ${proxy}\n`);
+      }
+      const child = spawn(this.executable, args, {
+        env,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe']
       });
@@ -136,7 +149,9 @@ export class TunnelRuntime {
       child.stderr?.on('data', chunk => this.ingest(String(chunk)));
       child.on('exit', code => {
         this.log(`tunnel-client exited (${code}).\n`);
-        this.child = null;
+        // Only clear the handle if this process is still the current one; a stop()+start()
+        // cycle can deliver the old process's exit event after a new one has been spawned.
+        if (this.child === child) this.child = null;
         this.emit();
       });
       this.log(`tunnel-client started, target ${target}\n`);
@@ -180,8 +195,9 @@ export class TunnelRuntime {
     const child = this.child;
     this.child = null;
     this.authError = '';
+    this.netError = '';
     this.startedAt = 0;
-    this.probe = { at: 0, value: false };
+    this.probe = { at: 0, value: { ok: false, detail: '' } };
     if (!child) return;
     if (process.platform === 'win32' && child.pid) {
       spawnSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true });
@@ -207,11 +223,12 @@ export class TunnelRuntime {
 
     // /readyz only proves the local daemon came up: a wrong Runtime API Key still
     // returns 200 there. Ask the daemon explicitly for one successful control-plane poll.
-    const connected = ready && this.controlPlaneConnected();
+    const cp = this.controlPlaneProbe();
+    const connected = ready && cp.ok;
     if (connected) this.authError = '';
     // Local gates can pass while the control plane keeps rejecting the key. Surface that
     // instead of leaving the operator with a silent, misleading "ready".
-    const stalled = !connected && ready && this.startedAt > 0 && Date.now() - this.startedAt > 25000;
+    const stalled = !connected && ready && this.startedAt > 0 && Date.now() - this.startedAt > 120000;
 
     return {
       installed: this.isInstalled(),
@@ -220,45 +237,67 @@ export class TunnelRuntime {
       live,
       ready,
       connected,
+      controlPlane: { ok: cp.ok, detail: cp.detail, at: this.probe.at },
+      proxy: this.store.config.proxy || '',
       tunnelId: this.store.tunnelId,
       hasKey: this.store.hasApiKey(),
-      lastError: this.authError || (stalled ? '控制面尚未连接：请确认 Runtime API Key 有效，且该 Tunnel 已启用。' : ''),
+      lastError: this.authError || this.netError || (stalled ? '控制面尚未连接：请确认 Tunnel ID 与 Runtime API Key 正确，且本组织已启用 Secure MCP Tunnel；若网络需代理，请在凭据下方填写代理端口。' : ''),
       installing: this.installing,
       message: this.message
     };
   }
 
-  /** `tunnel-client health --require-control-plane-poll` exits 0 only after an authenticated poll. */
-  private controlPlaneConnected(): boolean {
-    if (!this.child) return false;
+  /**
+   * Runs `tunnel-client health --require-control-plane-poll` and returns both the pass/fail
+   * and the daemon's own poll line, so the UI can show live progress instead of a static label.
+   */
+  private controlPlaneProbe(): { ok: boolean; detail: string } {
+    if (!this.child) return { ok: false, detail: '' };
     const now = Date.now();
     if (now - this.probe.at < 2000) return this.probe.value;
-    let value = false;
+    let ok = false;
+    let detail = '';
     try {
       const result = spawnSync(this.executable, [
         'health',
         '--port', String(this.store.config.healthPort),
         '--require-control-plane-poll'
       ], { encoding: 'utf8', windowsHide: true, timeout: 2500 });
-      value = result.status === 0;
+      ok = result.status === 0;
+      const line = (result.stdout || result.stderr || '')
+        .split('\n')
+        .find(l => /control-plane poll/i.test(l));
+      detail = line ? line.trim() : (ok ? 'Control-plane poll: PASS' : 'Control-plane poll: FAIL');
     } catch {
-      value = false;
+      ok = false;
+      detail = 'Control-plane poll: 探测异常';
     }
-    this.probe = { at: now, value };
-    return value;
+    this.probe = { at: now, value: { ok, detail } };
+    return this.probe.value;
   }
 
-  /** Daemon output goes to the log view and is scanned for credential rejections. */
+  /** Accepts "7897", "127.0.0.1:7897" or a full "http://host:port"; always returns a URL or "". */
+  private normalizeProxy(raw?: string): string {
+    const v = (raw ?? '').trim();
+    if (!v) return '';
+    if (/^https?:\/\//i.test(v)) return v;
+    if (/^\d+$/.test(v)) return `http://127.0.0.1:${v}`;
+    if (/^[\w.-]+:\d+$/.test(v)) return `http://${v}`;
+    return v;
+  }
+
+  /** Daemon output goes to the log view and is scanned to tell credential rejections apart
+   * from plain network unreachability (no proxy / DNS / firewall). */
   private ingest(chunk: string): void {
     this.log(chunk);
-    // A valid key makes the control plane return the tunnel metadata; with an invalid one
-    // the daemon logs "tunnel meta hasn't fetched" rather than an HTTP status.
-    if (/tunnel meta hasn't fetched/i.test(chunk)) {
-      this.authError = '控制面未能识别该 Tunnel：Runtime API Key 无效或已撤销，或该 Tunnel 不属于此 Key。';
-      return;
-    }
+    // Explicit auth failure: the control plane refused the key.
     if (/(401|403|unauthorized|forbidden)/i.test(chunk) && /control[ -]?plane|api[ _-]?key|token|auth/i.test(chunk)) {
       this.authError = '控制面拒绝了凭据（401/403）：Runtime API Key 无效或已撤销。';
+      return;
+    }
+    // Plain network failure: cannot even reach the control plane. Almost always a missing proxy.
+    if (/dial tcp|connection attempt failed|no such host|i\/o timeout|connectex|connection refused|network is unreachable|TLS handshake/i.test(chunk)) {
+      this.netError = '无法连接控制面（网络不可达）。若你的网络需要代理，请在凭据下方填写代理端口（如 7897）。';
     }
   }
 

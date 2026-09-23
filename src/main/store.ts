@@ -6,6 +6,8 @@ export type AppConfig = {
   tunnelId: string;
   mcpPort: number;
   healthPort: number;
+  /** Optional outbound proxy for tunnel-client, e.g. "7897" or "http://127.0.0.1:7897". */
+  proxy?: string;
 };
 
 // 47933/47934 keep DeskLink clear of the 47831-47834 range used by RDC-X.

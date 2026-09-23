@@ -33,6 +33,10 @@ export type TunnelStatus = {
   ready: boolean;
   /** A control-plane poll actually succeeded, i.e. the Runtime API Key was accepted. */
   connected: boolean;
+  /** Live result of the control-plane poll probe, surfaced to the UI for real-time feedback. */
+  controlPlane: { ok: boolean; detail: string; at: number };
+  /** Outbound proxy configured for tunnel-client, surfaced so the form can prefill it. */
+  proxy: string;
   tunnelId: string;
   hasKey: boolean;
   lastError: string;

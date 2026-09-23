@@ -13,7 +13,7 @@ const views = {
 const phaseText = { idle: '未启动', starting: '启动中', ready: '已就绪', error: '错误' };
 
 let status = { phase: 'idle', detail: '', toolCount: 0, endpoint: '', commanderVersion: '', commanderLatest: '' };
-let tunnel = { installed: false, version: '', running: false, live: false, ready: false, connected: false, tunnelId: '', hasKey: false, lastError: '', installing: false, message: '' };
+let tunnel = { installed: false, version: '', running: false, live: false, ready: false, connected: false, controlPlane: { ok: false, detail: '' }, proxy: '', tunnelId: '', hasKey: false, lastError: '', installing: false, message: '' };
 let logs = '';
 let tools = [];
 let diagnosis = null;
@@ -136,6 +136,15 @@ function renderTunnel() {
   keyField.placeholder = tunnel.hasKey ? '已保存，留空则沿用' : '运行时密钥';
   keyRow.append(keyField);
   form.append(keyRow);
+
+  const proxyRow = el('div', 'row');
+  proxyRow.append(el('div', 'row-label', '代理（可选）'));
+  const proxyField = el('input', 'field');
+  proxyField.id = 'proxy';
+  proxyField.placeholder = '如 7897 或 http://127.0.0.1:7897';
+  proxyField.value = tunnel.proxy || '';
+  proxyRow.append(proxyField);
+  form.append(proxyRow);
   wrap.append(section('凭据', form));
 
   const rows = el('div', 'rows');
@@ -143,6 +152,17 @@ function renderTunnel() {
   rows.append(row('进程', tunnel.running ? '运行中' : '已停止'));
   rows.append(row('健康', tunnel.live ? '在线' : '—'));
   rows.append(row('就绪', tunnel.connected ? 'Ready' : tunnel.ready ? '等待控制面' : '—'));
+  if (tunnel.running) {
+    const cp = tunnel.controlPlane || { ok: false, detail: '' };
+    const line = el('div', 'row');
+    line.append(el('div', 'row-label', '控制面'));
+    if (tunnel.ready) {
+      const dot = el('span', 'status-dot ' + (cp.ok ? 'is-ready' : 'is-pulsing'));
+      line.append(dot);
+    }
+    line.append(el('div', 'row-value mono', cp.detail || '正在探测控制面…'));
+    rows.append(line);
+  }
   rows.append(row('密钥', tunnel.hasKey ? '已保存（Windows DPAPI）' : '未保存'));
   wrap.append(section('状态', rows));
 
@@ -169,7 +189,8 @@ function renderTunnel() {
     try {
       const result = await bridge.tunnelConnect({
         tunnelId: document.getElementById('tunnelId').value.trim(),
-        apiKey: document.getElementById('runtimeKey').value.trim()
+        apiKey: document.getElementById('runtimeKey').value.trim(),
+        proxy: document.getElementById('proxy').value.trim()
       });
       if (result?.error) tunnel.lastError = result.error;
     } finally {
@@ -347,8 +368,9 @@ function updateTitleStatus() {
   const dot = document.getElementById('titleStatus');
   const text = document.getElementById('titleStatusText');
   const ready = status.phase === 'ready' && tunnel.connected;
-  dot.className = 'status-dot' + (ready ? ' is-ready' : status.phase === 'ready' || tunnel.live ? ' is-live' : status.phase === 'error' ? ' is-error' : '');
-  text.textContent = ready ? '已就绪' : tunnel.connected ? '隧道已就绪' : status.detail || phaseText[status.phase];
+  const connecting = status.phase === 'ready' && tunnel.running && !tunnel.connected && tunnel.ready;
+  dot.className = 'status-dot' + (ready ? ' is-ready' : connecting ? ' is-live is-pulsing' : status.phase === 'ready' || tunnel.live ? ' is-live' : status.phase === 'error' ? ' is-error' : '');
+  text.textContent = ready ? '已就绪' : connecting ? '正在连接控制面…' : tunnel.connected ? '隧道已就绪' : status.detail || phaseText[status.phase];
 }
 
 async function loadTools() {

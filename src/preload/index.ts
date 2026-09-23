@@ -36,7 +36,7 @@ contextBridge.exposeInMainWorld('desklink', {
   nodeStatus: (): Promise<any> => ipcRenderer.invoke('desklink:node-status'),
   nodeInstall: (): Promise<any> => ipcRenderer.invoke('desklink:node-install'),
   tunnelStatus: (): Promise<TunnelStatus | null> => ipcRenderer.invoke('desklink:tunnel-status'),
-  tunnelConnect: (payload: { tunnelId: string; apiKey: string }): Promise<any> =>
+  tunnelConnect: (payload: { tunnelId: string; apiKey: string; proxy?: string }): Promise<any> =>
     ipcRenderer.invoke('desklink:tunnel-connect', payload),
   tunnelStop: (): Promise<TunnelStatus | null> => ipcRenderer.invoke('desklink:tunnel-stop'),
   tunnelInstall: (): Promise<any> => ipcRenderer.invoke('desklink:tunnel-install')

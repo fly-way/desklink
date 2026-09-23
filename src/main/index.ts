@@ -214,10 +214,13 @@ ipcMain.handle('desklink:node-install', async () => {
   }
 });
 ipcMain.handle('desklink:tunnel-status', () => tunnel?.status() ?? null);
-ipcMain.handle('desklink:tunnel-connect', async (_event, payload: { tunnelId: string; apiKey: string }) => {
+ipcMain.handle('desklink:tunnel-connect', async (_event, payload: { tunnelId: string; apiKey: string; proxy?: string }) => {
   if (!tunnel) return null;
   try {
-    await tunnel.configure(String(payload?.tunnelId ?? ''), String(payload?.apiKey ?? ''));
+    await tunnel.configure(String(payload?.tunnelId ?? ''), String(payload?.apiKey ?? ''), payload?.proxy);
+    // start() is a no-op while a daemon is already running, so an edited proxy/key would
+    // otherwise be ignored until a manual stop. Restart explicitly to apply the new config.
+    await tunnel.stop();
     await tunnel.start();
   } catch (error: any) {
     broadcast('desklink:tunnel', { ...(await tunnel.status()), lastError: String(error?.message ?? error) });
