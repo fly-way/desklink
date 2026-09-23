@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Build / packaging output
+build/
+dist/
+release/
+out/
+
+# Runtime state (config, DPAPI-encrypted key, logs)
+.desklink/
+
+# Prebuilt binaries downloaded at runtime (tunnel-client, cloudflared)
+tools/*.exe
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS cruft
+.DS_Store
+Thumbs.db

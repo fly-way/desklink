@@ -1,0 +1,56 @@
+{
+  "name": "desklink",
+  "version": "0.1.0",
+  "private": true,
+  "description": "macOS-style Windows console that links ChatGPT to Desktop Commander over OpenAI Secure MCP Tunnel",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "build": "tsc",
+    "icon": "node tools/make-icon.mjs",
+    "dev": "npm run build && electron .",
+    "start": "electron .",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder"
+  },
+  "build": {
+    "appId": "app.desklink",
+    "productName": "DeskLink",
+    "icon": "build/icon.ico",
+    "files": [
+      "dist/**/*",
+      "src/renderer/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "zip"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "DeskLink"
+    }
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.2",
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3",
+    "pngjs": "^7.0.0",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "express": "^5.2.1"
+  }
+}
