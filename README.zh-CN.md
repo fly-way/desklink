@@ -1,6 +1,6 @@
 # DeskLink
 
-> macOS 风格的 Windows 控制台，通过 OpenAI 安全 MCP 隧道（Secure MCP Tunnel）把 ChatGPT 连接到 Desktop Commander。
+> Windows 控制台，通过 OpenAI 安全 MCP 隧道（Secure MCP Tunnel）把 ChatGPT 连接到 Desktop Commander。
 
 DeskLink 是一个轻量的 Electron 桌面应用，把你的 Windows 电脑变成一个可被 ChatGPT 安全访问的桥接器，用于驱动 [Desktop Commander](https://www.npmjs.com/package/@wonderwhy-er/desktop-commander)。它在本地运行 Desktop Commander，再通过官方的 OpenAI **安全 MCP 隧道**（`tunnel-client`）把其 MCP 工具暴露给 ChatGPT——因此 ChatGPT 可以在你的机器上操作文件、执行 Shell 与命令，而**无需任何公网入站端口**。
 
@@ -10,6 +10,7 @@ English documentation: [README.md](README.md)
 
 - **开箱即用的 Desktop Commander** —— DeskLink 会自动准备 Node.js 运行时，并在首次运行时把最新的 `@wonderwhy-er/desktop-commander` 安装到私有数据目录中。
 - **官方 OpenAI 隧道** —— 使用 OpenAI `tunnel-client` 注册控制面隧道，仅建立出站连接，无需配置防火墙或端口转发。
+- **完整 MCP 透传** —— 同时镜像 Desktop Commander 的工具**与 UI 资源**（`resources/list` / `resources/read`），完整保留每个工具的 `inputSchema`；并同时支持新版 `2026-07-28` MCP 请求格式与旧版 `initialize` 客户端。这正是 ChatGPT 能成功创建连接器的关键。
 - **控制面感知的健康判定** —— "Ready" 表示一次真实的**控制面轮询成功**，而不只是本地守护进程已启动。Runtime API Key 错误时会被明确提示，而不是悄悄显示 "Ready"。
 - **默认安全** —— 隧道端点绑定在 `127.0.0.1`，并拒绝任何非 loopback 的 `Host` 头；Runtime API Key 使用 **Windows DPAPI** 加密保存，绝不以明文写入磁盘。
 - **自更新二进制** —— 首次启动时会下载与平台匹配的 `tunnel-client`，并校验其 SHA-256 校验和。
@@ -17,7 +18,7 @@ English documentation: [README.md](README.md)
 ## 架构
 
 ```
- ChatGPT  ──(OpenAI 控制面)──►  tunnel-client（本地）  ──loopback──►  Desktop Commander MCP
+ ChatGPT  ──(OpenAI 控制面)──►  tunnel-client（本地）  ──loopback──►  DeskLink MCP 代理  ──stdio──►  Desktop Commander
                                           │ 127.0.0.1:47933/mcp
                                           └ 127.0.0.1:47934/healthz、/readyz、/ui
 ```
@@ -66,6 +67,8 @@ English documentation: [README.md](README.md)
 - `tunnel-client run` 启动时，通过环境变量注入你的控制面凭据，并指向本地 MCP 端点。
 - 守护进程暴露 `/healthz`（存活）和 `/readyz`（本地启动门槛：OAuth 发现 + MCP 探测）。DeskLink 还会额外执行 `tunnel-client health --require-control-plane-poll`，以确认凭据确实被控制面接受。
 - 守护进程在启动时只探测一次 MCP 上游；DeskLink 会先等待 Desktop Commander 开始监听，再启动隧道，因此 `/readyz` 不会被一次过期的探测卡住。
+- loopback 端点是一个进程内的轻量代理（`McpProxy` + `createDeskLinkMcpHandler`）：它原样镜像 Desktop Commander 的工具**与资源**定义，并把每个 `tools/call`、`resources/list`、`resources/read` 通过 stdio 转发给 Desktop Commander。
+- 同时服务两代 MCP 协议：新版客户端通过 `server/discover` 与 `2026-07-28` 请求格式握手，旧版客户端回退到 SDK 的无状态 `initialize`。
 
 ## 配置
 
@@ -89,6 +92,7 @@ English documentation: [README.md](README.md)
 npm run build      # 将 TypeScript 编译到 dist/
 npm start          # 启动 Electron 应用（需先 build）
 npm run dev        # 构建并启动
+npm test           # 构建并运行单元测试（node:test）
 ```
 
 ### 打包

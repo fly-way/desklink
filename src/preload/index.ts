@@ -31,6 +31,8 @@ contextBridge.exposeInMainWorld('desklink', {
   },
   getTools: (): Promise<ToolSummary[]> => ipcRenderer.invoke('desklink:tools'),
   getLogs: (): Promise<string> => ipcRenderer.invoke('desklink:logs'),
+  appVersion: (): Promise<string> => ipcRenderer.invoke('desklink:app-version'),
+  checkAppUpdate: (): Promise<{ latest?: string; error?: string }> => ipcRenderer.invoke('desklink:app-update'),
   restart: (): Promise<boolean> => ipcRenderer.invoke('desklink:restart'),
   checkCommanderUpdate: (): Promise<string> => ipcRenderer.invoke('desklink:dc-update'),
   nodeStatus: (): Promise<any> => ipcRenderer.invoke('desklink:node-status'),
@@ -39,5 +41,6 @@ contextBridge.exposeInMainWorld('desklink', {
   tunnelConnect: (payload: { tunnelId: string; apiKey: string; proxy?: string }): Promise<any> =>
     ipcRenderer.invoke('desklink:tunnel-connect', payload),
   tunnelStop: (): Promise<TunnelStatus | null> => ipcRenderer.invoke('desklink:tunnel-stop'),
-  tunnelInstall: (): Promise<any> => ipcRenderer.invoke('desklink:tunnel-install')
+  tunnelInstall: (): Promise<any> => ipcRenderer.invoke('desklink:tunnel-install'),
+  setLocale: (locale: string) => ipcRenderer.send('desklink:set-locale', locale)
 });

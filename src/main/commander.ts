@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { NodeRuntime } from './node.js';
+import { tm } from './i18n.js';
 import type { Store } from './store.js';
 
 const PACKAGE = '@wonderwhy-er/desktop-commander';
@@ -57,7 +58,7 @@ export class CommanderRuntime {
     if (fs.existsSync(this.entry())) return true;
 
     fs.mkdirSync(this.installDir, { recursive: true });
-    this.onLog(`正在安装 Desktop Commander（${SPEC}）…\n`);
+    this.onLog(tm('logInstallCommander', { spec: SPEC }) + '\n');
     const result = spawnSync(node.executable, [node.npmCli, 'install', SPEC, '--no-audit', '--no-fund', '--loglevel', 'error'], {
       cwd: this.installDir,
       encoding: 'utf8',
@@ -65,10 +66,10 @@ export class CommanderRuntime {
       timeout: 300000
     });
     if (result.status !== 0) {
-      this.onLog(`Desktop Commander 安装失败：${String(result.stderr || result.stdout || '').trim().slice(0, 400)}\n`);
+      this.onLog(tm('logCommanderInstallFailed', { detail: String(result.stderr || result.stdout || '').trim().slice(0, 400) }) + '\n');
       return false;
     }
-    this.onLog(`Desktop Commander ${this.installedVersion} 已安装。\n`);
+    this.onLog(tm('logCommanderInstalled', { version: this.installedVersion }) + '\n');
     return true;
   }
 

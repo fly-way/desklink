@@ -6,6 +6,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import type { McpHttpHandler, Tool } from '@modelcontextprotocol/server';
 import { createDeskLinkMcpHandler } from './mcp-handler.js';
+import { tm } from './i18n.js';
 import { ProxyStatus, ToolSummary } from '../shared/types.js';
 
 
@@ -37,7 +38,7 @@ export class McpProxy {
 
   async start(): Promise<void> {
     if (this.client) return;
-    this.emit('starting', '正在启动 Desktop Commander…');
+    this.emit('starting', '');
 
     await this.commander.ensureInstalled();
     const { command, args } = this.commander.prepare();
@@ -74,10 +75,10 @@ export class McpProxy {
     try {
       await this.listen();
     } catch (error: any) {
-      this.emit('error', `无法监听 127.0.0.1:${this.port} — ${String(error?.message ?? error)}`);
+      this.emit('error', `${tm('errListenFailed', { port: this.port })} — ${String(error?.message ?? error)}`);
       return;
     }
-    this.emit('ready', 'Desktop Commander 已就绪');
+    this.emit('ready', '');
     void this.checkLatest();
   }
 
@@ -106,11 +107,16 @@ export class McpProxy {
     this.client = null;
     this.transport = null;
     this.proxiesResources = false;
-    this.emit('idle', '已停止');
+    this.emit('idle', '');
   }
 
   listTools(): ToolSummary[] {
     return this.tools.map(t => ({ name: t.name, description: (t.description ?? '') as string }));
+  }
+
+  /** Re-emits the current status, e.g. so cached text is re-rendered after a language switch. */
+  pushStatus(): void {
+    this.emit(this.phase, this.detail);
   }
 
   private async listen(): Promise<void> {

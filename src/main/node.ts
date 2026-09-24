@@ -3,6 +3,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import type { Store } from './store.js';
+import { tm } from './i18n.js';
 import type { NodeStatus } from '../shared/types.js';
 
 const MIN_MAJOR = 18; // Desktop Commander declares engines.node >= 18
@@ -98,22 +99,22 @@ export class NodeRuntime {
 
   /** Downloads the official Windows x64 build into <userData>\tools\node. */
   async install(onLog: (line: string) => void = () => {}): Promise<NodeStatus> {
-    if (process.platform !== 'win32') throw new Error('自动下载 Node 目前仅支持 Windows。');
+    if (process.platform !== 'win32') throw new Error(tm('errNodeWindowsOnly'));
 
     const listing = await fetch(DIST_INDEX).then(response => response.text());
     const match = /node-v(\d+\.\d+\.\d+)-win-x64\.zip/.exec(listing);
-    if (!match) throw new Error('未能从 nodejs.org 解析 Windows x64 包。');
+    if (!match) throw new Error(tm('errNodeResolveFailed'));
     const zipName = match[0];
     const version = match[1];
 
-    onLog(`下载 Node.js v${version}…\n`);
+    onLog(tm('logDownloadNode', { version }) + '\n');
     const zip = Buffer.from(await fetch(`${DIST_INDEX}${zipName}`).then(response => response.arrayBuffer()) as ArrayBuffer);
     const sums = await fetch(`${DIST_INDEX}SHASUMS256.txt`).then(response => response.text());
     const expected = sums.split(/\r?\n/)
       .map(line => line.trim().split(/\s+/))
       .find(([, name]) => name === zipName)?.[0];
     const actual = createHash('sha256').update(zip).digest('hex');
-    if (expected && expected.toLowerCase() !== actual) throw new Error('Node.js 安装包 SHA-256 校验失败。');
+    if (expected && expected.toLowerCase() !== actual) throw new Error(tm('errNodeChecksum'));
 
     const zipPath = path.join(this.store.toolsDir, zipName);
     fs.writeFileSync(zipPath, zip);
@@ -127,8 +128,8 @@ export class NodeRuntime {
     if (fs.existsSync(extracted)) fs.renameSync(extracted, target);
 
     const installed = this.status();
-    if (!installed.available) throw new Error('Node.js 解压后不可用，请重试。');
-    onLog(`Node.js v${installed.version} 已就绪。\n`);
+    if (!installed.available) throw new Error(tm('errNodeUnusable'));
+    onLog(tm('logNodeReady', { version: installed.version }) + '\n');
     return installed;
   }
 }

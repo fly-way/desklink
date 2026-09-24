@@ -31,7 +31,6 @@
   --radius-control: 5px;
   --radius-button: 6px;
 
-  --menubar-h: 24px;
   --titlebar-h: 38px;
   --sidebar-w: 202px;
 }
@@ -49,26 +48,6 @@ html, body {
 }
 
 body { display: flex; flex-direction: column; user-select: none; }
-
-/* ---------- macOS menu bar ---------- */
-.menubar {
-  flex: 0 0 var(--menubar-h);
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 0 10px;
-  font-size: 12px;
-  color: var(--text);
-  background: var(--bar-bg);
-  backdrop-filter: blur(28px) saturate(180%);
-  -webkit-backdrop-filter: blur(28px) saturate(180%);
-  border-bottom: 1px solid var(--separator);
-}
-.menu-brand { display: flex; align-items: center; }
-.menu-app { font-weight: 600; }
-.menu-items { display: flex; gap: 14px; color: var(--text); }
-.menu-items span { opacity: .85; }
-.menu-right { margin-left: auto; color: var(--text); font-variant-numeric: tabular-nums; }
 
 /* ---------- window shell ---------- */
 .window {

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import type { Store } from './store.js';
+import { tm } from './i18n.js';
 import type { TunnelStatus } from '../shared/types.js';
 
 const REPO = 'openai/tunnel-client';
@@ -22,10 +23,10 @@ export class TunnelRuntime {
   private child: ChildProcess | null = null;
   private installing = false;
   private message = '';
-  /** Last credential rejection reported by the daemon, if any. */
-  private authError = '';
-  /** Last network-unreachable signal (e.g. no proxy), as opposed to a credential rejection. */
-  private netError = '';
+  /** i18n key of the last credential rejection reported by the daemon, if any. */
+  private authErrorKey = '';
+  /** i18n key of the last network-unreachable signal, as opposed to a credential rejection. */
+  private netErrorKey = '';
   /** Cached result of the (expensive) control-plane poll probe. */
   private probe: { at: number; value: { ok: boolean; detail: string } } = { at: 0, value: { ok: false, detail: '' } };
   /** Guards against overlapping start() calls while waiting for the upstream. */
@@ -52,7 +53,7 @@ export class TunnelRuntime {
     if (!force && this.isInstalled()) return this.version();
 
     this.installing = true;
-    this.message = '正在安装 tunnel-client…';
+    this.message = tm('logInstallingTunnel');
     await this.emit();
     try {
       return await this.downloadAndInstall();
@@ -105,7 +106,7 @@ export class TunnelRuntime {
   async configure(tunnelId: string, apiKey: string, proxy?: string): Promise<void> {
     this.store.saveConfig({ tunnelId: tunnelId.trim(), proxy: proxy?.trim() || undefined });
     if (apiKey) this.store.setApiKey(apiKey.trim());
-    this.emit('凭据已保存。');
+    this.emit(tm('msgCredsSaved'));
   }
 
   async start(): Promise<void> {
@@ -113,13 +114,13 @@ export class TunnelRuntime {
     this.starting = true;
     try {
       if (!this.isInstalled()) await this.install();
-      this.authError = '';
-      this.netError = '';
+      this.authErrorKey = '';
+      this.netErrorKey = '';
       this.probe = { at: 0, value: { ok: false, detail: '' } };
       const apiKey = this.store.getApiKey();
       const tunnelId = this.store.tunnelId;
-      if (!tunnelId) throw new Error('Tunnel ID 未配置。');
-      if (!apiKey) throw new Error('Runtime API Key 未配置。');
+      if (!tunnelId) throw new Error(tm('errTunnelIdMissing'));
+      if (!apiKey) throw new Error(tm('errApiKeyMissing'));
 
       await this.waitForUpstream();
 
@@ -182,20 +183,20 @@ export class TunnelRuntime {
         return;
       } catch {
         if (!announced) {
-          this.log(`等待 Desktop Commander 在 127.0.0.1:${port} 就绪…\n`);
+          this.log(tm('logWaitCommander', { port }) + '\n');
           announced = true;
         }
         await new Promise(resolve => setTimeout(resolve, 1500));
       }
     }
-    throw new Error('Desktop Commander 尚未就绪，已取消启动 tunnel-client。请稍后重试。');
+    throw new Error(tm('errCommanderNotReady'));
   }
 
   async stop(): Promise<void> {
     const child = this.child;
     this.child = null;
-    this.authError = '';
-    this.netError = '';
+    this.authErrorKey = '';
+    this.netErrorKey = '';
     this.startedAt = 0;
     this.probe = { at: 0, value: { ok: false, detail: '' } };
     if (!child) return;
@@ -225,7 +226,7 @@ export class TunnelRuntime {
     // returns 200 there. Ask the daemon explicitly for one successful control-plane poll.
     const cp = this.controlPlaneProbe();
     const connected = ready && cp.ok;
-    if (connected) this.authError = '';
+    if (connected) this.authErrorKey = '';
     // Local gates can pass while the control plane keeps rejecting the key. Surface that
     // instead of leaving the operator with a silent, misleading "ready".
     const stalled = !connected && ready && this.startedAt > 0 && Date.now() - this.startedAt > 120000;
@@ -242,7 +243,7 @@ export class TunnelRuntime {
       startedAt: this.startedAt,
       tunnelId: this.store.tunnelId,
       hasKey: this.store.hasApiKey(),
-      lastError: this.authError || this.netError || (stalled ? '控制面尚未连接：请确认 Tunnel ID 与 Runtime API Key 正确，且本组织已启用 Secure MCP Tunnel；若网络需代理，请在凭据下方填写代理端口。' : ''),
+      lastError: (this.authErrorKey && tm(this.authErrorKey)) || (this.netErrorKey && tm(this.netErrorKey)) || (stalled ? tm('errControlPlaneStalled') : ''),
       installing: this.installing,
       message: this.message
     };
@@ -271,7 +272,7 @@ export class TunnelRuntime {
       detail = line ? line.trim() : (ok ? 'Control-plane poll: PASS' : 'Control-plane poll: FAIL');
     } catch {
       ok = false;
-      detail = 'Control-plane poll: 探测异常';
+      detail = tm('errProbeFailed');
     }
     this.probe = { at: now, value: { ok, detail } };
     return this.probe.value;
@@ -293,12 +294,12 @@ export class TunnelRuntime {
     this.log(chunk);
     // Explicit auth failure: the control plane refused the key.
     if (/(401|403|unauthorized|forbidden)/i.test(chunk) && /control[ -]?plane|api[ _-]?key|token|auth/i.test(chunk)) {
-      this.authError = '控制面拒绝了凭据（401/403）：Runtime API Key 无效或已撤销。';
+      this.authErrorKey = 'errAuthRejected';
       return;
     }
     // Plain network failure: cannot even reach the control plane. Almost always a missing proxy.
     if (/dial tcp|connection attempt failed|no such host|i\/o timeout|connectex|connection refused|network is unreachable|TLS handshake/i.test(chunk)) {
-      this.netError = '无法连接控制面（网络不可达）。若你的网络需要代理，请在凭据下方填写代理端口（如 7897）。';
+      this.netErrorKey = 'errNetUnreachable';
     }
   }
 

@@ -1,10 +1,11 @@
-import { app, BrowserWindow, ipcMain, screen } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, screen } from 'electron';
 import path from 'node:path';
 import { CommanderRuntime } from './commander.js';
 import { McpProxy } from './mcp-proxy.js';
 import { NodeRuntime } from './node.js';
 import { Store } from './store.js';
 import { TunnelRuntime } from './tunnel.js';
+import { setLocale, tm } from './i18n.js';
 import type { ProxyStatus, TunnelStatus } from '../shared/types.js';
 
 // Runtime state (config, DPAPI key, tunnel-client) must live outside the read-only asar.
@@ -64,6 +65,9 @@ function recordLog(line: string): void {
 }
 
 app.whenReady().then(() => {
+  // DeskLink draws its own frameless title bar; the default application menu
+  // (文件/编辑/显示/窗口/帮助) is not wanted, so remove it entirely rather than auto-hide it.
+  Menu.setApplicationMenu(null);
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 
@@ -92,17 +96,17 @@ async function bootstrapTunnel(): Promise<void> {
   if (!tunnel || !store) return;
   try {
     if (!tunnel.isInstalled()) {
-      recordLog('tunnel-client 未安装，正在准备…\n');
+      recordLog(tm('logTunnelPreparing') + '\n');
       await tunnel.install();
     }
     await pushTunnelStatus();
     if (store.tunnelId && store.hasApiKey()) {
-      recordLog('已保存凭据，正在启动 tunnel-client…\n');
+      recordLog(tm('logStartingWithCreds') + '\n');
       await tunnel.start();
     }
   } catch (error: any) {
     broadcast('desklink:tunnel', { ...(await tunnel.status()), lastError: String(error?.message ?? error) });
-    recordLog(`tunnel 准备失败：${String(error?.message ?? error)}\n`);
+    recordLog(tm('logPrepareFailed', { message: String(error?.message ?? error) }) + '\n');
   }
 }
 
@@ -162,6 +166,19 @@ ipcMain.on('window:drag-move', (event, point: { x: number; y: number }) => {
 ipcMain.on('window:drag-end', () => { dragOrigin = null; });
 
 ipcMain.handle('desklink:tools', () => proxy?.listTools() ?? []);
+ipcMain.handle('desklink:app-version', () => app.getVersion());
+ipcMain.handle('desklink:app-update', async () => {
+  try {
+    const res = await fetch('https://registry.npmjs.org/desklink/latest', { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) return { error: 'http ' + res.status };
+    const data: any = await res.json();
+    const latest = data && data.version;
+    if (!latest) return { error: 'no version' };
+    return { latest };
+  } catch (error: any) {
+    return { error: String(error?.message ?? error) };
+  }
+});
 ipcMain.handle('desklink:logs', () => logBuffer.join(''));
 ipcMain.handle('desklink:dc-update', () => proxy?.checkLatest() ?? '');
 ipcMain.handle('desklink:diagnostics', async () => {
@@ -240,4 +257,12 @@ ipcMain.handle('desklink:tunnel-install', async () => {
     return { error: String(error?.message ?? error) };
   }
   return tunnel.status();
+});
+
+// The renderer owns the language choice (Settings → Language); mirror it here so main-process
+// log lines and error texts match, then re-push status so cached text is re-rendered.
+ipcMain.on('desklink:set-locale', (_event, locale: string) => {
+  setLocale(typeof locale === 'string' ? locale : null);
+  void pushTunnelStatus();
+  proxy?.pushStatus();
 });

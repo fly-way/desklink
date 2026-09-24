@@ -1,16 +1,26 @@
 'use strict';
 
 const bridge = window.desklink;
+// i18n is loaded from i18n.js (in <head>); fall back to passthrough if absent.
+const i18n = window.__i18n || { locale: 'zh-CN', t: (k) => k, tl: (k) => k, days: ['周日', '周一', '周二', '周三', '周四', '周五', '周六'] };
+const t = i18n.t;
+const tl = i18n.tl;
+
+// Restored language choice ('auto' follows the OS); applied before the first render.
+let langChoice = 'auto';
+try { langChoice = localStorage.getItem('desklink.lang') || 'auto'; } catch {}
+if (langChoice !== 'auto') i18n.setLocale(langChoice);
 
 const views = {
-  overview: { title: '概览', render: renderOverview },
-  tunnel: { title: '隧道', render: renderTunnel },
-  tools: { title: '工具', render: renderTools },
-  logs: { title: '日志', render: renderLogs },
-  diagnostics: { title: '诊断', render: renderDiagnostics }
+  overview: { title: t('viewOverview'), render: renderOverview },
+  tunnel: { title: t('viewTunnel'), render: renderTunnel },
+  tools: { title: t('viewTools'), render: renderTools },
+  logs: { title: t('viewLogs'), render: renderLogs },
+  diagnostics: { title: t('viewDiagnostics'), render: renderDiagnostics },
+  settings: { title: t('viewSettings'), render: renderSettings }
 };
 
-const phaseText = { idle: '未启动', starting: '启动中', ready: '已就绪', error: '错误' };
+let phaseText = { idle: t('phaseIdle'), starting: t('phaseStarting'), ready: t('phaseReady'), error: t('phaseError') };
 
 let status = { phase: 'idle', detail: '', toolCount: 0, endpoint: '', commanderVersion: '', commanderLatest: '' };
 let tunnel = { installed: false, version: '', running: false, live: false, ready: false, connected: false, controlPlane: { ok: false, detail: '' }, proxy: '', tunnelId: '', hasKey: false, lastError: '', installing: false, message: '' };
@@ -20,6 +30,10 @@ let diagnosis = null;
 let current = 'overview';
 /** True while a tunnel action (connect/install/stop) is awaiting a remote response. */
 let tunnelBusy = false;
+/** Proxy value kept in the Settings view; sent on connect (the tunnel view no longer edits it). */
+let proxyDraft = '';
+/** Cached DeskLink version, fetched once at startup for the Settings view. */
+let appVersion = '';
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -70,9 +84,9 @@ function button(label, handler, busyLabel) {
     if (busyLabel) node.textContent = busyLabel;
     try {
       const result = await handler();
-      setFeedback(result ? String(result) : '完成');
+      setFeedback(result ? String(result) : t('done'));
     } catch (error) {
-      setFeedback('失败：' + String(error?.message ?? error), true);
+      setFeedback(t('failed') + String(error?.message ?? error), true);
     } finally {
       node.disabled = false;
       node.textContent = original;
@@ -82,50 +96,61 @@ function button(label, handler, busyLabel) {
 }
 
 function tunnelText() {
-  if (tunnel.installing) return tunnel.message || '正在安装 tunnel-client…';
-  if (tunnel.connected) return 'Ready';
-  if (tunnel.ready) return '本地就绪，等待控制面';
-  if (tunnel.live) return '在线，等待就绪';
-  if (tunnel.running) return '进程已启动';
-  return '未连接';
+  if (tunnel.installing) return tunnel.message || t('tunInstalling');
+  if (tunnel.connected) return t('tunConnected');
+  if (tunnel.ready) return t('tunLocalReady');
+  if (tunnel.live) return t('tunOnline');
+  if (tunnel.running) return t('tunProcess');
+  return t('tunDisconnected');
+}
+
+/** Localized phase label; only the 'error' phase falls back to the raw, dynamic detail text. */
+function phaseLabel(phase) {
+  return phaseText[phase] || phase || '';
+}
+
+/** Desktop Commander status line: prefer the localized phase over the main-process detail prose. */
+function commanderText() {
+  if (status.phase === 'error') return status.detail || phaseText.error;
+  return phaseText[status.phase] || status.detail || '';
 }
 
 function renderOverview() {
   const wrap = document.createDocumentFragment();
-  wrap.append(head('概览', 'DeskLink 把 ChatGPT 的 MCP 调用转发给本机的 Desktop Commander。'));
+  wrap.append(head(t('viewOverview'), t('ovSubtitle')));
 
   const rows = el('div', 'rows');
-  rows.append(row('隧道', tunnelText()));
-  rows.append(row('Desktop Commander', status.detail || phaseText[status.phase]));
-  rows.append(row('工具数量', String(status.toolCount)));
-  rows.append(row('MCP 端点', status.endpoint || '—', true));
-  wrap.append(section('运行状态', rows));
+  rows.append(row(t('rowTunnel'), tunnelText()));
+  rows.append(row('Desktop Commander', commanderText()));
+  rows.append(row(t('rowToolCount'), String(status.toolCount)));
+  rows.append(row(t('rowMcpEndpoint'), status.endpoint || '—', true));
+  wrap.append(section(t('secStatus'), rows));
 
   const bar = el('div', 'toolbar');
-  bar.append(button('重启 Desktop Commander', async () => {
+  bar.append(button(t('btnRestartCommander'), async () => {
     await bridge.restart();
-    return '已重启 Desktop Commander';
-  }, '重启中…'));
+    return t('restartedCommander');
+  }, t('restarting')));
   bar.append(el('span', 'spacer'));
-  bar.append(el('span', 'muted', '工具清单由 Desktop Commander 提供，原样转发'));
+  bar.append(el('span', 'muted', t('noteToolsForward')));
   wrap.append(bar);
 
   const flow = el('div', 'note');
-  flow.textContent = 'ChatGPT → Custom MCP Connector → OpenAI Secure MCP Tunnel → tunnel-client → DeskLink → Desktop Commander（stdio）→ 本机文件 / 搜索 / 编辑 / 进程 / Shell';
-  wrap.append(section('链路', flow));
+  flow.textContent = t('flowText');
+  wrap.append(section(t('secLink'), flow));
   return wrap;
 }
 
 function renderTunnel() {
   const wrap = document.createDocumentFragment();
-  wrap.append(head('隧道', '连接 OpenAI Secure MCP Tunnel 后，ChatGPT 才能调用本机能力。'));
+  wrap.append(head(t('viewTunnel'), t('tunSubtitle')));
 
   const form = el('div');
   const idRow = el('div', 'row');
   idRow.append(el('div', 'row-label', 'Tunnel ID'));
   const idField = el('input', 'field mono');
   idField.id = 'tunnelId';
-  idField.placeholder = 'tunnel_ 开头，32 位十六进制';
+  idField.placeholder = t('phTunnelId');
   idField.value = tunnel.tunnelId;
   idRow.append(idField);
   form.append(idRow);
@@ -135,19 +160,16 @@ function renderTunnel() {
   const keyField = el('input', 'field');
   keyField.id = 'runtimeKey';
   keyField.type = 'password';
-  keyField.placeholder = tunnel.hasKey ? '已保存，留空则沿用' : '运行时密钥';
+  keyField.placeholder = tunnel.hasKey ? t('phKeySaved') : t('phKey');
   keyRow.append(keyField);
   form.append(keyRow);
 
   const proxyRow = el('div', 'row');
-  proxyRow.append(el('div', 'row-label', '代理（可选）'));
-  const proxyField = el('input', 'field');
-  proxyField.id = 'proxy';
-  proxyField.placeholder = '如 7897 或 http://127.0.0.1:7897';
-  proxyField.value = tunnel.proxy || '';
-  proxyRow.append(proxyField);
+  proxyRow.append(el('div', 'row-label', t('lblProxy')));
+  const proxyNote = el('div', 'row-value muted', t('proxyInSettings'));
+  proxyRow.append(proxyNote);
   form.append(proxyRow);
-  wrap.append(section('凭据', form));
+  wrap.append(section(t('secCreds'), form));
 
   // Daemon is up but the control plane has not acknowledged the key yet: keep actions locked
   // for a grace window so a slow/uncertain remote answer can't be disturbed by local edits.
@@ -155,30 +177,30 @@ function renderTunnel() {
     && Date.now() - (tunnel.startedAt || 0) < 90000;
 
   const rows = el('div', 'rows');
-  rows.append(row('tunnel-client', tunnel.installed ? tunnel.version || '已安装' : '未安装'));
-  rows.append(row('进程', tunnel.running ? '运行中' : '已停止'));
-  rows.append(row('健康', tunnel.live ? '在线' : '—'));
+  rows.append(row('tunnel-client', tunnel.installed ? tunnel.version || t('installed') : t('notInstalled')));
+  rows.append(row(t('rowProcess'), tunnel.running ? t('procRunning') : t('procStopped')));
+  rows.append(row(t('rowHealth'), tunnel.live ? t('healthOnline') : '—'));
   const readyRow = el('div', 'row');
-  readyRow.append(el('div', 'row-label', '就绪'));
-  const readyValue = el('div', 'row-value', tunnel.connected ? 'Ready' : tunnel.ready ? '等待控制面' : '—');
+  readyRow.append(el('div', 'row-label', t('rowReady')));
+  const readyValue = el('div', 'row-value', tunnel.connected ? t('tunConnected') : tunnel.ready ? t('readyWaiting') : '—');
   if (waiting) readyValue.classList.add('waiting-dots');
   readyRow.append(readyValue);
   rows.append(readyRow);
   if (tunnel.running) {
     const cp = tunnel.controlPlane || { ok: false, detail: '' };
     const line = el('div', 'row');
-    line.append(el('div', 'row-label', '控制面'));
+    line.append(el('div', 'row-label', t('rowControlPlane')));
     if (tunnel.ready) {
       const dot = el('span', 'status-dot ' + (cp.ok ? 'is-ready' : 'is-pulsing'));
       line.append(dot);
     }
-    line.append(el('div', 'row-value mono', cp.detail || '正在探测控制面…'));
+    line.append(el('div', 'row-value mono', cp.detail || t('probing')));
     rows.append(line);
   }
-  rows.append(row('密钥', tunnel.hasKey ? '已保存（Windows DPAPI）' : '未保存'));
-  wrap.append(section('状态', rows));
+  rows.append(row(t('rowKey'), tunnel.hasKey ? t('keySaved') : t('keyUnsaved')));
+  wrap.append(section(t('secStatus'), rows));
 
-  if (tunnel.installing) wrap.append(el('div', 'note', tunnel.message || '正在安装 tunnel-client…'));
+  if (tunnel.installing) wrap.append(el('div', 'note', tunnel.message || t('installingNote')));
   if (tunnel.lastError) {
     const note = el('div', 'note', tunnel.lastError);
     note.id = 'tunnelError';
@@ -190,7 +212,7 @@ function renderTunnel() {
   const lock = tunnelBusy || tunnel.installing || waiting;
 
   const bar = el('div', 'toolbar');
-  const installBtn = button(tunnel.installed ? '更新 tunnel-client' : '安装 tunnel-client', async () => {
+  const installBtn = button(tunnel.installed ? t('btnInstallUpdate') : t('btnInstall'), async () => {
     tunnelBusy = true;
     show(current);
     try {
@@ -198,22 +220,22 @@ function renderTunnel() {
       if (result?.error) throw new Error(result.error);
       tunnel.lastError = '';
       show(current);
-      return 'tunnel-client 已更新';
+      return t('updated');
     } finally {
       tunnelBusy = false;
       show(current);
     }
-  }, '下载中…');
+  }, t('downloading'));
   installBtn.disabled = lock;
   bar.append(installBtn);
 
-  const connect = el('button', 'btn btn-default', '连接并启动');
+  const connect = el('button', 'btn btn-default', t('btnConnectStart'));
   connect.disabled = !tunnel.installed || lock;
   connect.addEventListener('click', async () => {
     const payload = {
       tunnelId: document.getElementById('tunnelId').value.trim(),
       apiKey: document.getElementById('runtimeKey').value.trim(),
-      proxy: document.getElementById('proxy').value.trim()
+      proxy: proxyDraft
     };
     tunnelBusy = true;
     show(current);
@@ -227,12 +249,12 @@ function renderTunnel() {
   });
   bar.append(connect);
 
-  const stop = button('停止', async () => {
+  const stop = button(t('btnStop'), async () => {
     tunnelBusy = true;
     show(current);
     try {
       await bridge.tunnelStop();
-      return '已停止 tunnel-client';
+      return t('stopped');
     } finally {
       tunnelBusy = false;
       show(current);
@@ -257,45 +279,45 @@ function toolRow(tool) {
 function updateNote() {
   const version = status.commanderVersion;
   const latest = status.commanderLatest;
-  if (!version || !latest) return '未检查';
-  if (version === latest) return '已是最新';
-  return `有更新 ${latest}，重启 Desktop Commander 生效`;
+  if (!version || !latest) return t('notChecked');
+  if (version === latest) return t('upToDate');
+  return tl('updateAvailable', { latest });
 }
 
 function renderTools() {
   const wrap = document.createDocumentFragment();
-  wrap.append(head('工具', '工具清单由 Desktop Commander 提供，DeskLink 原样转发。'));
+  wrap.append(head(t('viewTools'), t('toolsSubtitle')));
 
   const rows = el('div', 'rows');
-  rows.append(row('运行版本', status.commanderVersion || '—', true));
-  rows.append(row('最新版本', status.commanderLatest || '—', true));
-  rows.append(row('更新', updateNote()));
+  rows.append(row(t('rowRunningVersion'), status.commanderVersion || '—', true));
+  rows.append(row(t('rowLatestVersion'), status.commanderLatest || '—', true));
+  rows.append(row(t('rowUpdate'), updateNote()));
   wrap.append(section('Desktop Commander', rows));
 
   const bar = el('div', 'toolbar');
-  bar.append(button('检查更新', async () => {
+  bar.append(button(t('btnCheckUpdate'), async () => {
     const latest = await bridge.checkCommanderUpdate();
-    return latest ? `最新可用版本 ${latest}` : '未能获取版本，请检查网络或 npm';
-  }, '检查中…'));
-  bar.append(button('更新 Desktop Commander', async () => {
+    return latest ? tl('latestAvailable', { latest }) : t('checkUpdateFailed');
+  }, t('checking')));
+  bar.append(button(t('btnUpdateCommander'), async () => {
     await bridge.restart();
-    return '已按 @latest 重新安装并启动';
-  }, '更新中…'));
+    return t('updatedLatest');
+  }, t('restarting')));
   bar.append(el('span', 'spacer'));
-  bar.append(el('span', 'muted', '启动时用 @latest 解析，版本变化才下载'));
+  bar.append(el('span', 'muted', t('noteVersionResolve')));
   wrap.append(bar);
 
   const list = el('div', 'rows');
   if (tools.length) for (const tool of tools) list.append(toolRow(tool));
-  else list.append(el('div', 'empty', '等待 Desktop Commander 就绪…'));
-  wrap.append(section(`工具（${tools.length}）`, list));
+  else list.append(el('div', 'empty', t('emptyTools')));
+  wrap.append(section(tl('secTools', { n: tools.length }), list));
   return wrap;
 }
 
 function renderLogs() {
   const wrap = document.createDocumentFragment();
-  wrap.append(head('日志', 'Desktop Commander、tunnel-client 与 DeskLink 的输出。'));
-  const view = el('div', 'log-view', logs || '尚无日志。\n');
+  wrap.append(head(t('viewLogs'), t('logsSubtitle')));
+  const view = el('div', 'log-view', logs || t('noLogs') + '\n');
   view.id = 'logView';
   wrap.append(view);
   return wrap;
@@ -303,55 +325,129 @@ function renderLogs() {
 
 function renderDiagnostics() {
   const wrap = document.createDocumentFragment();
-  wrap.append(head('诊断', '检查运行 Desktop Commander 与隧道所需的本机环境。'));
+  wrap.append(head(t('viewDiagnostics'), t('diagSubtitle')));
 
   const rows = el('div', 'rows');
   const add = (label, value, mono) => rows.append(row(label, value, mono));
 
   if (diagnosis) {
-    add('Node.js（运行时）', diagnosis.runtime?.version
-      ? `${diagnosis.runtime.version} · ${diagnosis.runtime.source === 'bundled' ? '应用内置' : '系统'}${diagnosis.runtime.satisfies ? '' : ' · 版本过低'}`
-      : '未检测到', true);
+    add(t('diagRuntime'), diagnosis.runtime?.version
+      ? `${diagnosis.runtime.version} · ${diagnosis.runtime.source === 'bundled' ? t('sourceBundled') : t('sourceSystem')}${diagnosis.runtime.satisfies ? '' : t('versionLow')}`
+      : t('notDetected'), true);
     add('Electron', diagnosis.electron || '—', true);
-    add('Desktop Commander（已装）', diagnosis.runtime?.commanderInstalled || '未预装', true);
-    add('Desktop Commander', diagnosis.commander?.version || diagnosis.commander?.phase || '—', true);
-    add('工具数量', String(diagnosis.commander?.toolCount ?? 0));
-    add('MCP 端口', `${diagnosis.endpoint?.port} · ${diagnosis.endpoint?.reachable ? '可访问' : '不可访问'}`, true);
-    add('tunnel-client', diagnosis.tunnel?.installed ? diagnosis.tunnel.version || '已安装' : '未安装');
-    add('Runtime API Key', diagnosis.tunnel?.hasKey ? '已保存' : '未保存');
+    add(t('diagCommanderInstalled'), diagnosis.runtime?.commanderInstalled || t('notPreinstalled'), true);
+    add('Desktop Commander', diagnosis.commander?.version || phaseLabel(diagnosis.commander?.phase) || '—', true);
+    add(t('diagToolCount'), String(diagnosis.commander?.toolCount ?? 0));
+    add(t('diagMcpPort'), `${diagnosis.endpoint?.port} · ${diagnosis.endpoint?.reachable ? t('reachable') : t('unreachable')}`, true);
+    add('tunnel-client', diagnosis.tunnel?.installed ? diagnosis.tunnel.version || t('installed') : t('notInstalled'));
+    add('Runtime API Key', diagnosis.tunnel?.hasKey ? t('keySaved') : t('keyUnsaved'));
     add('Tunnel ID', diagnosis.tunnel?.tunnelId || '—', true);
   } else {
     add('Node.js', bridge.versions?.node ?? '—', true);
     add('Electron', bridge.versions?.electron ?? '—', true);
-    add('Desktop Commander', status.detail || phaseText[status.phase]);
-    add('MCP 端点', status.endpoint || '—', true);
-    add('tunnel-client', tunnel.installed ? tunnel.version || '已安装' : '未安装');
-    add('提示', '点击“运行诊断”获取实时结果');
+    add('Desktop Commander', commanderText());
+    add(t('rowMcpEndpoint'), status.endpoint || '—', true);
+    add('tunnel-client', tunnel.installed ? tunnel.version || t('installed') : t('notInstalled'));
+    add(t('hint'), t('clickRunDiag'));
   }
-  wrap.append(section('环境', rows));
+  wrap.append(section(t('secEnv'), rows));
 
   const bar = el('div', 'toolbar');
-  bar.append(button('运行诊断', async () => {
+  bar.append(button(t('btnRunDiag'), async () => {
     diagnosis = await bridge.diagnostics();
     show('diagnostics');
-    return '诊断完成';
-  }, '检查中…'));
+    return t('diagDone');
+  }, t('checking')));
   bar.append(el('span', 'spacer'));
-  bar.append(el('span', 'muted', 'Desktop Commander 需要 Node.js ≥ 18'));
+  bar.append(el('span', 'muted', t('noteNodeRequired')));
   wrap.append(bar);
 
   const runtime = diagnosis?.runtime;
   if (runtime && (!runtime.available || !runtime.satisfies)) {
     const action = el('div', 'toolbar');
-    action.append(button('下载 Node.js（官方绿色版）', async () => {
+    action.append(button(t('btnDownloadNode'), async () => {
       const result = await bridge.nodeInstall();
       if (result?.error) throw new Error(result.error);
       diagnosis = await bridge.diagnostics();
       show('diagnostics');
-      return result?.version ? `Node.js ${result.version} 已就绪，请重启 Desktop Commander` : 'Node.js 已就绪';
-    }, '下载中…'));
+      return result?.version ? tl('nodeReadyRestart', { version: result.version }) : t('nodeReady');
+    }, t('downloading')));
     wrap.append(action);
   }
+  return wrap;
+}
+
+// Recompute language-dependent strings after a locale switch (titles/phase map are cached at load).
+function refreshStrings() {
+  views.overview.title = t('viewOverview');
+  views.tunnel.title = t('viewTunnel');
+  views.tools.title = t('viewTools');
+  views.logs.title = t('viewLogs');
+  views.diagnostics.title = t('viewDiagnostics');
+  views.settings.title = t('viewSettings');
+  phaseText = { idle: t('phaseIdle'), starting: t('phaseStarting'), ready: t('phaseReady'), error: t('phaseError') };
+}
+
+async function checkDesklinkUpdate() {
+  const r = await bridge.checkAppUpdate();
+  if (r?.error) return t('updateCheckFailed');
+  if (appVersion && r.latest === appVersion) return tl('updateResultLatest', { version: r.latest });
+  return tl('updateAvailableDesklink', { latest: r.latest, current: appVersion || '?' });
+}
+
+function renderSettings() {
+  const wrap = document.createDocumentFragment();
+  wrap.append(head(t('viewSettings'), t('settingsSubtitle')));
+
+  // General
+  const genRows = el('div', 'rows');
+  const langRow = el('div', 'row');
+  langRow.append(el('div', 'row-label', t('settingLang')));
+  const sel = el('select', 'field');
+  sel.id = 'langSelect';
+  for (const [val, label] of [['auto', t('langAuto')], ['zh-CN', t('langZh')], ['en-US', t('langEn')]]) {
+    const o = el('option');
+    o.value = val;
+    o.textContent = label;
+    sel.append(o);
+  }
+  sel.value = langChoice;
+  sel.addEventListener('change', () => {
+    langChoice = sel.value;
+    try { localStorage.setItem('desklink.lang', langChoice); } catch {}
+    i18n.setLocale(langChoice);
+    bridge.setLocale(i18n.locale);
+    refreshStrings();
+    updateTitleStatus();
+    show('settings');
+  });
+  langRow.append(sel);
+  genRows.append(langRow);
+  wrap.append(section(t('settingsGeneral'), genRows));
+
+  // Tunnel — proxy (moved out of the Tunnel view)
+  const tunRows = el('div', 'rows');
+  const proxyRow = el('div', 'row');
+  proxyRow.append(el('div', 'row-label', t('lblProxy')));
+  const proxyField = el('input', 'field');
+  proxyField.id = 'proxy';
+  proxyField.placeholder = t('phProxy');
+  proxyField.value = proxyDraft || '';
+  proxyField.addEventListener('input', () => { proxyDraft = proxyField.value.trim(); });
+  proxyRow.append(proxyField);
+  tunRows.append(proxyRow);
+  wrap.append(section(t('settingsTunnel'), tunRows));
+
+  // About
+  const aboutRows = el('div', 'rows');
+  aboutRows.append(row(t('desklinkVersion'), appVersion || '—', true));
+  wrap.append(section(t('aboutDesklink'), aboutRows));
+
+  const bar = el('div', 'toolbar');
+  bar.append(button(t('checkAppUpdate'), async () => {
+    return await checkDesklinkUpdate();
+  }, t('checking')));
+  wrap.append(bar);
   return wrap;
 }
 
@@ -407,7 +503,7 @@ function updateTitleStatus() {
   const connecting = status.phase === 'ready' && tunnel.running && !tunnel.connected && tunnel.ready;
   dot.className = 'status-dot' + (ready ? ' is-ready' : connecting ? ' is-live is-pulsing' : status.phase === 'ready' || tunnel.live ? ' is-live' : status.phase === 'error' ? ' is-error' : '');
   text.classList.toggle('waiting-dots', connecting);
-  text.textContent = ready ? '已就绪' : connecting ? '正在连接控制面' : tunnel.connected ? '隧道已就绪' : status.detail || phaseText[status.phase];
+  text.textContent = ready ? t('titleReady') : connecting ? t('titleConnecting') : tunnel.connected ? t('titleTunnelReady') : commanderText();
 }
 
 async function loadTools() {
@@ -415,19 +511,8 @@ async function loadTools() {
   if (current === 'tools') show('tools');
 }
 
-function startClock() {
-  const target = document.getElementById('menuClock');
-  const tick = () => {
-    const now = new Date();
-    const week = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][now.getDay()];
-    target.textContent = `${week} ${now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`;
-  };
-  tick();
-  setInterval(tick, 15000);
-}
-
 (function enableDragging() {
-  const bars = [document.querySelector('.menubar'), document.querySelector('.titlebar')].filter(Boolean);
+  const bars = [document.querySelector('.titlebar')].filter(Boolean);
   const THRESHOLD = 4;
   let dragging = false;
   let moved = false;
@@ -495,10 +580,13 @@ bridge.onLog(line => {
     const initial = await bridge.tunnelStatus();
     if (initial) tunnel = initial;
   } catch {}
+  if (!proxyDraft) proxyDraft = tunnel.proxy || '';
+  try { appVersion = await bridge.appVersion(); } catch {}
   updateTitleStatus();
 })();
 
-startClock();
+// Keep main-process messages (logs, errors) in the same language as the UI.
+bridge.setLocale(i18n.locale);
 updateTitleStatus();
 show('overview');
 void loadTools();
