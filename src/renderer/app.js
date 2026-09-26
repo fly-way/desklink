@@ -112,6 +112,7 @@ function phaseLabel(phase) {
 /** Desktop Commander status line: prefer the localized phase over the main-process detail prose. */
 function commanderText() {
   if (status.phase === 'error') return status.detail || phaseText.error;
+  if (status.phase === 'starting') return status.detail || phaseText.starting;
   return phaseText[status.phase] || status.detail || '';
 }
 
@@ -125,6 +126,15 @@ function renderOverview() {
   rows.append(row(t('rowToolCount'), String(status.toolCount)));
   rows.append(row(t('rowMcpEndpoint'), status.endpoint || '—', true));
   wrap.append(section(t('secStatus'), rows));
+
+  if (status.phase === 'starting') {
+    const startup = el('div', 'startup-progress-wrap');
+    startup.append(el('div', 'startup-progress-label', commanderText()));
+    const track = el('div', 'startup-progress');
+    track.append(el('div', 'startup-progress-bar'));
+    startup.append(track);
+    wrap.append(startup);
+  }
 
   const bar = el('div', 'toolbar');
   bar.append(button(t('btnRestartCommander'), async () => {
@@ -502,7 +512,7 @@ function updateTitleStatus() {
   const ready = status.phase === 'ready' && tunnel.connected;
   const connecting = status.phase === 'ready' && tunnel.running && !tunnel.connected && tunnel.ready;
   dot.className = 'status-dot' + (ready ? ' is-ready' : connecting ? ' is-live is-pulsing' : status.phase === 'ready' || tunnel.live ? ' is-live' : status.phase === 'error' ? ' is-error' : '');
-  text.classList.toggle('waiting-dots', connecting);
+  text.classList.toggle('waiting-dots', connecting || status.phase === 'starting');
   text.textContent = ready ? t('titleReady') : connecting ? t('titleConnecting') : tunnel.connected ? t('titleTunnelReady') : commanderText();
 }
 

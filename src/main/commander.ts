@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import type { NodeRuntime } from './node.js';
 import { tm } from './i18n.js';
 import type { Store } from './store.js';
@@ -59,14 +59,25 @@ export class CommanderRuntime {
 
     fs.mkdirSync(this.installDir, { recursive: true });
     this.onLog(tm('logInstallCommander', { spec: SPEC }) + '\n');
-    const result = spawnSync(node.executable, [node.npmCli, 'install', SPEC, '--no-audit', '--no-fund', '--loglevel', 'error'], {
-      cwd: this.installDir,
-      encoding: 'utf8',
-      windowsHide: true,
-      timeout: 300000
+    const result = await new Promise<{ code: number | null; detail: string }>(resolve => {
+      const child = spawn(node.executable, [node.npmCli, 'install', SPEC, '--no-audit', '--no-fund', '--loglevel', 'notice'], {
+        cwd: this.installDir,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      let detail = '';
+      const append = (chunk: Buffer | string) => {
+        const text = String(chunk);
+        detail = (detail + text).slice(-4000);
+        this.onLog(text);
+      };
+      child.stdout?.on('data', append);
+      child.stderr?.on('data', append);
+      child.once('error', error => resolve({ code: -1, detail: String(error?.message ?? error) }));
+      child.once('close', code => resolve({ code, detail }));
     });
-    if (result.status !== 0) {
-      this.onLog(tm('logCommanderInstallFailed', { detail: String(result.stderr || result.stdout || '').trim().slice(0, 400) }) + '\n');
+    if (result.code !== 0) {
+      this.onLog(tm('logCommanderInstallFailed', { detail: result.detail.trim().slice(-400) }) + '\n');
       return false;
     }
     this.onLog(tm('logCommanderInstalled', { version: this.installedVersion }) + '\n');

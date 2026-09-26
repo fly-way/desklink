@@ -38,9 +38,10 @@ export class McpProxy {
 
   async start(): Promise<void> {
     if (this.client) return;
-    this.emit('starting', '');
+    this.emit('starting', this.commander.installedVersion ? tm('statusStartingCommander') : tm('statusPreparingCommander'));
 
     await this.commander.ensureInstalled();
+    this.emit('starting', tm('statusStartingCommander'));
     const { command, args } = this.commander.prepare();
     this.transport = new StdioClientTransport({
       command,

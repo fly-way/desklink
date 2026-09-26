@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, screen } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, nativeImage, screen, Tray } from 'electron';
 import path from 'node:path';
 import { CommanderRuntime } from './commander.js';
 import { McpProxy } from './mcp-proxy.js';
@@ -10,7 +10,13 @@ import type { ProxyStatus, TunnelStatus } from '../shared/types.js';
 
 // Runtime state (config, DPAPI key, tunnel-client) must live outside the read-only asar.
 const root = app.getPath('userData');
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) app.quit();
+
 let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
+let isQuitting = false;
+let isCleaningUp = false;
 let proxy: McpProxy | null = null;
 let tunnel: TunnelRuntime | null = null;
 let store: Store | null = null;
@@ -26,7 +32,35 @@ function broadcast(channel: string, payload: unknown): void {
   for (const window of BrowserWindow.getAllWindows()) window.webContents.send(channel, payload);
 }
 
-function createWindow(): void {
+function showMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function refreshTrayMenu(): void {
+  if (!tray) return;
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: tm('trayOpen'), click: showMainWindow },
+    { type: 'separator' },
+    { label: tm('trayQuit'), click: () => { isQuitting = true; app.quit(); } }
+  ]));
+}
+
+function createTray(): void {
+  if (tray) return;
+  const icon = nativeImage.createFromPath(path.join(app.getAppPath(), 'build', 'icon.ico'));
+  tray = new Tray(icon);
+  tray.setToolTip('DeskLink');
+  refreshTrayMenu();
+  tray.on('click', showMainWindow);
+}
+
+function createWindow(): BrowserWindow {
   const workArea = screen.getPrimaryDisplay().workArea;
   const width = Math.min(1080, Math.max(900, Math.round(workArea.width * 0.64)));
   const height = Math.min(720, Math.max(600, Math.round(workArea.height * 0.8)));
@@ -54,8 +88,15 @@ function createWindow(): void {
   window.once('ready-to-show', () => window.show());
   window.on('enter-full-screen', () => window.webContents.send('window:fullscreen', true));
   window.on('leave-full-screen', () => window.webContents.send('window:fullscreen', false));
+  window.on('close', event => {
+    if (isQuitting) return;
+    event.preventDefault();
+    window.hide();
+  });
+  window.on('closed', () => { if (mainWindow === window) mainWindow = null; });
   window.loadFile(rendererPath());
   mainWindow = window;
+  return window;
 }
 
 function recordLog(line: string): void {
@@ -64,32 +105,39 @@ function recordLog(line: string): void {
   broadcast('desklink:log', line);
 }
 
-app.whenReady().then(() => {
-  // DeskLink draws its own frameless title bar; the default application menu
-  // (文件/编辑/显示/窗口/帮助) is not wanted, so remove it entirely rather than auto-hide it.
-  Menu.setApplicationMenu(null);
-  createWindow();
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+if (hasSingleInstanceLock) {
+  app.on('second-instance', () => { void app.whenReady().then(showMainWindow); });
 
-  store = new Store(root);
-  nodeRuntime = new NodeRuntime(store);
-  commander = new CommanderRuntime(store, nodeRuntime, recordLog);
-  proxy = new McpProxy(
-    store.config.mcpPort,
-    commander,
-    (status: ProxyStatus) => broadcast('desklink:status', status),
-    recordLog
-  );
-  tunnel = new TunnelRuntime(
-    store,
-    (status: TunnelStatus) => broadcast('desklink:tunnel', status),
-    recordLog
-  );
+  app.whenReady().then(() => {
+    // DeskLink draws its own frameless title bar; the default application menu
+    // (文件/编辑/显示/窗口/帮助) is not wanted, so remove it entirely rather than auto-hide it.
+    Menu.setApplicationMenu(null);
 
-  void proxy.start();
-  void bootstrapTunnel();
-  setInterval(() => { void pushTunnelStatus(); }, 3000);
-});
+    store = new Store(root);
+    nodeRuntime = new NodeRuntime(store);
+    commander = new CommanderRuntime(store, nodeRuntime, recordLog);
+    proxy = new McpProxy(
+      store.config.mcpPort,
+      commander,
+      (status: ProxyStatus) => broadcast('desklink:status', status),
+      recordLog
+    );
+    tunnel = new TunnelRuntime(
+      store,
+      (status: TunnelStatus) => broadcast('desklink:tunnel', status),
+      recordLog
+    );
+
+    const window = createWindow();
+    createTray();
+    window.webContents.once('did-finish-load', () => {
+      void proxy?.start();
+      void bootstrapTunnel();
+    });
+    app.on('activate', showMainWindow);
+    setInterval(() => { void pushTunnelStatus(); }, 3000);
+  });
+}
 
 /** Like Start-All.cmd: make sure everything DeskLink needs is present, then connect if configured. */
 async function bootstrapTunnel(): Promise<void> {
@@ -115,11 +163,21 @@ async function pushTunnelStatus(): Promise<void> {
   broadcast('desklink:tunnel', await tunnel.status());
 }
 
-app.on('before-quit', async () => {
-  await tunnel?.stop();
-  await proxy?.stop();
+app.on('before-quit', event => {
+  isQuitting = true;
+  if (isCleaningUp) return;
+  event.preventDefault();
+  isCleaningUp = true;
+  void (async () => {
+    await tunnel?.stop();
+    await proxy?.stop();
+    tray?.destroy();
+    tray = null;
+    app.quit();
+  })();
 });
-app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+// Closing the last window keeps DeskLink alive in the system tray.
+app.on('window-all-closed', () => {});
 
 ipcMain.on('window:action', (event, action: string) => {
   const window = BrowserWindow.fromWebContents(event.sender);
@@ -263,6 +321,7 @@ ipcMain.handle('desklink:tunnel-install', async () => {
 // log lines and error texts match, then re-push status so cached text is re-rendered.
 ipcMain.on('desklink:set-locale', (_event, locale: string) => {
   setLocale(typeof locale === 'string' ? locale : null);
+  refreshTrayMenu();
   void pushTunnelStatus();
   proxy?.pushStatus();
 });

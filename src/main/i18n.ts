@@ -35,6 +35,10 @@ const zh: Record<string, string> = {
   errNodeResolveFailed: '未能从 nodejs.org 解析 Windows x64 包。',
   errNodeChecksum: 'Node.js 安装包 SHA-256 校验失败。',
   errNodeUnusable: 'Node.js 解压后不可用，请重试。',
+  statusPreparingCommander: '首次启动可能需要下载依赖，正在准备 Desktop Commander…',
+  statusStartingCommander: '正在启动 Desktop Commander…',
+  trayOpen: '打开 DeskLink',
+  trayQuit: '退出 DeskLink',
   msgCredsSaved: '凭据已保存。'
 };
 
@@ -64,6 +68,10 @@ const en: Record<string, string> = {
   errNodeResolveFailed: 'Could not resolve the Windows x64 package from nodejs.org.',
   errNodeChecksum: 'Node.js installer SHA-256 checksum failed.',
   errNodeUnusable: 'Node.js is unusable after extraction; please retry.',
+  statusPreparingCommander: 'First launch may need to download dependencies; preparing Desktop Commander…',
+  statusStartingCommander: 'Starting Desktop Commander…',
+  trayOpen: 'Open DeskLink',
+  trayQuit: 'Quit DeskLink',
   msgCredsSaved: 'Credentials saved.'
 };
 
