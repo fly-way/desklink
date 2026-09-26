@@ -39,7 +39,13 @@ const zh: Record<string, string> = {
   statusStartingCommander: '正在启动 Desktop Commander…',
   trayOpen: '打开 DeskLink',
   trayQuit: '退出 DeskLink',
-  msgCredsSaved: '凭据已保存。'
+  msgCredsSaved: '凭据已保存。',
+  unityPromptTitle: '检测到 Unity 项目',
+  unityPromptMessage: '是否为 {project} 安装并启用 Unity MCP？',
+  unityPromptDetail: 'DeskLink 检测到正在运行的 Unity 项目：\n{path}\n\n启用后，ChatGPT 可以通过 MCP 操作 Scene、GameObject、Prefab、Console 等 Unity Editor 能力。\n\n选择“暂不处理”后，本次 Unity 会话不再重复提醒；下次重新打开项目时会再次提示。',
+  unityPromptInstall: '安装并启用',
+  unityPromptCancel: '暂不处理',
+  unityPromptBalloon: '检测到 Unity 项目 {project}，需要确认是否启用 Unity MCP。'
 };
 
 const en: Record<string, string> = {
@@ -72,7 +78,13 @@ const en: Record<string, string> = {
   statusStartingCommander: 'Starting Desktop Commander…',
   trayOpen: 'Open DeskLink',
   trayQuit: 'Quit DeskLink',
-  msgCredsSaved: 'Credentials saved.'
+  msgCredsSaved: 'Credentials saved.',
+  unityPromptTitle: 'Unity Project Detected',
+  unityPromptMessage: 'Install and enable Unity MCP for {project}?',
+  unityPromptDetail: 'DeskLink detected a running Unity project:\n{path}\n\nAfter enabling it, ChatGPT can use MCP to work with Unity Editor capabilities such as scenes, GameObjects, prefabs, and the Console.\n\nChoosing “Not Now” will suppress this prompt for the current Unity session; it will appear again the next time the project is opened.',
+  unityPromptInstall: 'Install & Enable',
+  unityPromptCancel: 'Not Now',
+  unityPromptBalloon: 'Unity project {project} was detected and needs confirmation to enable Unity MCP.'
 };
 
 /** Set by the renderer (Settings → Language); null means "follow the system". */

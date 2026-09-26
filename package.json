@@ -1,11 +1,11 @@
 {
   "name": "desklink",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "macOS-style Windows console that links ChatGPT to Desktop Commander over OpenAI Secure MCP Tunnel",
+  "description": "Windows MCP gateway that securely connects ChatGPT to local tools and desktop applications over OpenAI Secure MCP Tunnel",
   "main": "dist/main/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "npm run icon && tsc",
     "test": "npm run build && node --test test/*.test.js",
     "icon": "node tools/make-icon.mjs",
     "dev": "npm run build && electron .",
@@ -48,7 +48,8 @@
     "@types/node": "^26.6.2",
     "electron": "^44.4.5",
     "electron-builder": "^26.15.3",
-    "pngjs": "^7.0.0",
+    "pe-library": "^0.4.1",
+    "resedit": "^1.7.2",
     "typescript": "^7.0.2"
   },
   "dependencies": {

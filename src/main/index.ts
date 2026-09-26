@@ -1,15 +1,19 @@
-import { app, BrowserWindow, ipcMain, Menu, nativeImage, screen, Tray } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, screen, Tray } from 'electron';
 import path from 'node:path';
 import { CommanderRuntime } from './commander.js';
 import { McpProxy } from './mcp-proxy.js';
 import { NodeRuntime } from './node.js';
-import { Store } from './store.js';
+import { DesktopCommanderProvider } from './providers/desktop-commander-provider.js';
+import { ProviderManager } from './providers/provider-manager.js';
+import { UnityProvider } from './providers/unity/unity-provider.js';
+import { Store, type UnityProjectMode } from './store.js';
 import { TunnelRuntime } from './tunnel.js';
 import { setLocale, tm } from './i18n.js';
-import type { ProxyStatus, TunnelStatus } from '../shared/types.js';
+import type { ProviderSummary, ProxyStatus, TunnelStatus } from '../shared/types.js';
 
 // Runtime state (config, DPAPI key, tunnel-client) must live outside the read-only asar.
 const root = app.getPath('userData');
+if (process.platform === 'win32') app.setAppUserModelId('app.desklink');
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
 
@@ -22,6 +26,11 @@ let tunnel: TunnelRuntime | null = null;
 let store: Store | null = null;
 let nodeRuntime: NodeRuntime | null = null;
 let commander: CommanderRuntime | null = null;
+let desktopCommanderProvider: DesktopCommanderProvider | null = null;
+let unityProvider: UnityProvider | null = null;
+let providerManager: ProviderManager | null = null;
+const unityPromptedSessions = new Set<string>();
+let unityPromptInFlight = false;
 const logBuffer: string[] = [];
 
 function rendererPath(): string {
@@ -40,6 +49,73 @@ function showMainWindow(): void {
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
+}
+
+function unityPromptSessionKey(provider: ProviderSummary): string {
+  const meta = provider.meta ?? {};
+  return `${String(meta.projectPath ?? '')}|${String(meta.unityPid ?? 0)}`;
+}
+
+function needsUnitySetupPrompt(provider: ProviderSummary): boolean {
+  if (provider.id !== 'unity') return false;
+  const meta = provider.meta ?? {};
+  if (!meta.projectPath || !meta.unityPid) return false;
+  if (meta.projectMode === 'disabled') return false;
+  if (meta.installationApproved && meta.packageDeclared && !meta.packageInstalled) return false;
+  return !meta.packageInstalled || !meta.packageCompatible || !meta.integrationInstalled;
+}
+
+async function maybePromptUnitySetup(providers: ProviderSummary[]): Promise<void> {
+  if (unityPromptInFlight || !unityProvider) return;
+  const unity = providers.find(needsUnitySetupPrompt);
+  if (!unity) return;
+
+  const key = unityPromptSessionKey(unity);
+  if (unityPromptedSessions.has(key)) return;
+  unityPromptedSessions.add(key);
+  unityPromptInFlight = true;
+
+  try {
+    const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+    const isBackground = !window || !window.isVisible() || window.isMinimized() || !window.isFocused();
+    const canFlashTaskbar = Boolean(window && window.isVisible() && !window.isMinimized() && !window.isFocused());
+    const meta = unity.meta ?? {};
+
+    if (process.platform === 'win32' && isBackground && tray) {
+      tray.displayBalloon({
+        title: tm('unityPromptTitle'),
+        content: tm('unityPromptBalloon', { project: String(meta.projectName ?? 'Unity') }),
+        iconType: 'info',
+        noSound: false
+      });
+    }
+    if (canFlashTaskbar) window!.flashFrame(true);
+
+    const options: Electron.MessageBoxOptions = {
+      type: 'info',
+      title: tm('unityPromptTitle'),
+      message: tm('unityPromptMessage', { project: String(meta.projectName ?? 'Unity') }),
+      detail: tm('unityPromptDetail', { path: String(meta.projectPath ?? '') }),
+      buttons: [tm('unityPromptInstall'), tm('unityPromptCancel')],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true
+    };
+    const result = window && window.isVisible() && !window.isMinimized()
+      ? await dialog.showMessageBox(window, options)
+      : await dialog.showMessageBox(options);
+    window?.flashFrame(false);
+
+    if (result.response === 0) {
+      showMainWindow();
+      await unityProvider.installCurrentProject(String(meta.projectPath ?? ''));
+    }
+  } catch (error: any) {
+    recordLog(`Unity setup prompt failed: ${String(error?.message ?? error)}\n`);
+  } finally {
+    mainWindow?.flashFrame(false);
+    unityPromptInFlight = false;
+  }
 }
 
 function refreshTrayMenu(): void {
@@ -73,6 +149,7 @@ function createWindow(): BrowserWindow {
     frame: false,
     titleBarStyle: 'hidden',
     backgroundColor: '#f5f5f7',
+    icon: path.join(app.getAppPath(), 'build', 'icon.ico'),
     show: false,
     autoHideMenuBar: true,
     webPreferences: {
@@ -116,9 +193,21 @@ if (hasSingleInstanceLock) {
     store = new Store(root);
     nodeRuntime = new NodeRuntime(store);
     commander = new CommanderRuntime(store, nodeRuntime, recordLog);
+    desktopCommanderProvider = new DesktopCommanderProvider(commander, recordLog);
+    unityProvider = new UnityProvider(store, recordLog);
+    providerManager = new ProviderManager(
+      [desktopCommanderProvider, unityProvider],
+      providers => {
+        broadcast('desklink:providers', providers);
+        proxy?.pushStatus();
+        void maybePromptUnitySetup(providers);
+      },
+      recordLog
+    );
     proxy = new McpProxy(
       store.config.mcpPort,
-      commander,
+      providerManager,
+      desktopCommanderProvider,
       (status: ProxyStatus) => broadcast('desklink:status', status),
       recordLog
     );
@@ -224,6 +313,14 @@ ipcMain.on('window:drag-move', (event, point: { x: number; y: number }) => {
 ipcMain.on('window:drag-end', () => { dragOrigin = null; });
 
 ipcMain.handle('desklink:tools', () => proxy?.listTools() ?? []);
+ipcMain.handle('desklink:providers', () => providerManager?.statuses() ?? []);
+ipcMain.handle('desklink:unity-refresh', () => unityProvider?.refreshNow() ?? null);
+ipcMain.handle('desklink:unity-install', (_event, projectPath?: string) =>
+  unityProvider?.installCurrentProject(projectPath) ?? null);
+ipcMain.handle('desklink:unity-start', (_event, projectPath?: string) =>
+  unityProvider?.startCurrentProject(projectPath) ?? null);
+ipcMain.handle('desklink:unity-mode', (_event, payload: { mode: UnityProjectMode; projectPath?: string }) =>
+  unityProvider?.setProjectMode(payload.mode, payload.projectPath) ?? null);
 ipcMain.handle('desklink:app-version', () => app.getVersion());
 ipcMain.handle('desklink:app-update', async () => {
   try {
@@ -265,10 +362,11 @@ ipcMain.handle('desklink:diagnostics', async () => {
       commanderInstalled: commander?.installedVersion ?? ''
     },
     commander: {
-      phase: proxy ? (proxy as any).phase ?? '' : '',
-      version: proxy ? (proxy as any).commanderVersion ?? '' : '',
-      toolCount: proxy?.listTools().length ?? 0
+      phase: desktopCommanderProvider?.getStatus().phase ?? '',
+      version: desktopCommanderProvider?.getStatus().version ?? '',
+      toolCount: desktopCommanderProvider?.getStatus().toolCount ?? 0
     },
+    providers: providerManager?.statuses() ?? [],
     endpoint: { port: mcpPort, reachable: endpointReachable },
     tunnel: await tunnel?.status()
   };

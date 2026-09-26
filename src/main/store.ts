@@ -2,12 +2,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { protectSecret, unprotectSecret } from './secrets.js';
 
+export type UnityProjectMode = 'auto' | 'manual' | 'disabled';
+
+export type UnityProjectPreference = {
+  mode: UnityProjectMode;
+  installationApproved: boolean;
+  packageVersion?: string;
+};
+
 export type AppConfig = {
   tunnelId: string;
   mcpPort: number;
   healthPort: number;
   /** Optional outbound proxy for tunnel-client, e.g. "7897" or "http://127.0.0.1:7897". */
   proxy?: string;
+  unityProjects?: Record<string, UnityProjectPreference>;
 };
 
 // 47933/47934 keep DeskLink clear of the 47831-47834 range used by RDC-X.
@@ -43,6 +52,18 @@ export class Store {
     return next;
   }
 
+  getUnityProjectPreference(projectPath: string): UnityProjectPreference | undefined {
+    return this.config.unityProjects?.[this.unityProjectKey(projectPath)];
+  }
+
+  saveUnityProjectPreference(projectPath: string, value: Partial<UnityProjectPreference>): UnityProjectPreference {
+    const key = this.unityProjectKey(projectPath);
+    const current = this.getUnityProjectPreference(projectPath) ?? { mode: 'auto', installationApproved: false };
+    const next = { ...current, ...value };
+    this.saveConfig({ unityProjects: { ...(this.config.unityProjects ?? {}), [key]: next } });
+    return next;
+  }
+
   get tunnelId(): string {
     return this.config.tunnelId;
   }
@@ -62,5 +83,10 @@ export class Store {
 
   clearApiKey(): void {
     fs.rmSync(this.file('tunnel-key.dpapi'), { force: true });
+  }
+
+  private unityProjectKey(projectPath: string): string {
+    const normalized = path.resolve(projectPath).replace(/[\\/]+$/, '');
+    return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
   }
 }

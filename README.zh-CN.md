@@ -1,110 +1,202 @@
 # DeskLink
 
-> Windows 控制台，通过 OpenAI 安全 MCP 隧道（Secure MCP Tunnel）把 ChatGPT 连接到 Desktop Commander。
+> Windows 本地 MCP 网关，通过安全隧道把 ChatGPT 连接到本机工具与专业桌面应用。
 
-DeskLink 是一个轻量的 Electron 桌面应用，把你的 Windows 电脑变成一个可被 ChatGPT 安全访问的桥接器，用于驱动 [Desktop Commander](https://www.npmjs.com/package/@wonderwhy-er/desktop-commander)。它在本地运行 Desktop Commander，再通过官方的 OpenAI **安全 MCP 隧道**（`tunnel-client`）把其 MCP 工具暴露给 ChatGPT——因此 ChatGPT 可以在你的机器上操作文件、执行 Shell 与命令，而**无需任何公网入站端口**。
+DeskLink 是一个轻量的 Windows Electron 应用。它通过官方 OpenAI **安全 MCP 隧道（Secure MCP Tunnel）**，把本地 MCP Provider 暴露给 ChatGPT，同时不需要开放公网入站端口。
+
+目前 DeskLink 内置两个 Provider：
+
+- **Desktop Commander**：文件、Shell、进程、Git 与通用电脑自动化。
+- **Unity MCP**：Scene、GameObject、Component、Prefab、Material、Console、Play Mode 等结构化 Unity Editor 能力。
 
 English documentation: [README.md](README.md)
 
 ## 功能特性
 
-- **开箱即用的 Desktop Commander** —— DeskLink 会自动准备 Node.js 运行时，并在首次运行时把最新的 `@wonderwhy-er/desktop-commander` 安装到私有数据目录中。
-- **官方 OpenAI 隧道** —— 使用 OpenAI `tunnel-client` 注册控制面隧道，仅建立出站连接，无需配置防火墙或端口转发。
-- **完整 MCP 透传** —— 同时镜像 Desktop Commander 的工具**与 UI 资源**（`resources/list` / `resources/read`），完整保留每个工具的 `inputSchema`；并同时支持新版 `2026-07-28` MCP 请求格式与旧版 `initialize` 客户端。这正是 ChatGPT 能成功创建连接器的关键。
-- **控制面感知的健康判定** —— "Ready" 表示一次真实的**控制面轮询成功**，而不只是本地守护进程已启动。Runtime API Key 错误时会被明确提示，而不是悄悄显示 "Ready"。
-- **默认安全** —— 隧道端点绑定在 `127.0.0.1`，并拒绝任何非 loopback 的 `Host` 头；Runtime API Key 使用 **Windows DPAPI** 加密保存，绝不以明文写入磁盘。
-- **自更新二进制** —— 首次启动时会下载与平台匹配的 `tunnel-client`，并校验其 SHA-256 校验和。
+- **多 Provider MCP Gateway** —— 把多个本地 MCP Provider 的工具与资源聚合到同一个 DeskLink 端点。
+- **开箱即用的 Desktop Commander** —— 自动准备 Node.js 运行时，并把 `@wonderwhy-er/desktop-commander` 安装到 DeskLink 私有数据目录。
+- **Unity Editor 集成** —— 自动检测正在运行的 Unity 项目，并可按项目安装和管理固定版本的 `MCP for Unity`。
+- **Provider 生命周期管理** —— Unity 项目支持 **自动 / 手动 / 禁用** 三种模式。
+- **动态能力路由** —— Provider Ready 后才暴露工具；某个 Provider 失败不会拖垮其他 Provider。
+- **官方 OpenAI 隧道** —— 使用 OpenAI `tunnel-client`，只建立出站连接。
+- **完整 MCP 透传** —— 保留工具 schema，并转发 `tools/call`、`resources/list`、`resources/read`。
+- **兼容新旧 MCP** —— 同时支持新版 `2026-07-28` 请求格式与旧版无状态 `initialize` 客户端。
+- **控制面感知健康状态** —— “Ready” 表示真实 OpenAI 控制面轮询成功，而不只是本地 daemon 已启动。
+- **安全保存凭据** —— Runtime API Key 使用 **Windows DPAPI** 加密，不以明文落盘。
+- **运行时下载校验** —— tunnel / uv 等运行时组件在元数据可用时进行校验和验证。
+- **桌面体验** —— 托盘运行、单实例、后台提醒、Unity 安装确认、需要用户操作时任务栏提醒。
+- **统一 Windows 图标** —— 打包版使用与 `npm run dev` 开发态一致的 Electron 应用图标。
 
 ## 架构
 
+```text
+ ChatGPT
+    │
+    │ OpenAI Secure MCP Tunnel
+    ▼
+ tunnel-client
+    │ loopback
+    ▼
+ DeskLink MCP Gateway
+    ├── Desktop Commander Provider ──stdio──► Desktop Commander
+    └── Unity Provider ──────────────stdio──► MCP for Unity Server
+                                                │
+                                                ▼
+                                           Unity Editor
 ```
- ChatGPT  ──(OpenAI 控制面)──►  tunnel-client（本地）  ──loopback──►  DeskLink MCP 代理  ──stdio──►  Desktop Commander
-                                          │ 127.0.0.1:47933/mcp
-                                          └ 127.0.0.1:47934/healthz、/readyz、/ui
+
+本地端点：
+
+- MCP：`127.0.0.1:47933/mcp`
+- Health / 运维界面：`127.0.0.1:47934`
+
+DeskLink 的本地端点只绑定 loopback。
+
+## 内置 Provider
+
+| Provider | 典型能力 | 默认行为 |
+|---|---|---|
+| Desktop Commander | 文件、代码编辑、Shell、Git、进程、本地自动化 | 始终启用 |
+| Unity MCP | Scene、GameObject、Component、Prefab、Material、Console、Play Mode、Editor 操作 | 已批准项目按 Auto 运行 |
+
+Gateway 会把当前活跃 Provider 合并成一份工具注册表。即使某个 Provider 启动失败，其他健康 Provider 仍保持可用。
+
+## Unity 集成
+
+DeskLink 当前固定使用 **MCP for Unity 10.2.0**。
+
+检测到运行中的 Unity 项目后，DeskLink 会检查项目集成状态。第一次使用时，DeskLink 会先询问用户，确认后才修改项目。
+
+用户批准后，DeskLink 会：
+
+1. 添加固定版本的 `com.coplaydev.unity-mcp` 依赖。
+2. 在 Unity Editor 内请求真实的 Package Manager Resolve。
+3. 等待 Package 真正解析与导入，而不是仅凭 `manifest.json` 判断安装成功。
+4. 安装一个很薄的项目级 DeskLink bootstrap。
+5. 启动 Unity MCP stdio server，并自动选择匹配的 Editor instance。
+6. 将 Unity 工具通过与 ChatGPT 相同的 DeskLink MCP Gateway 暴露出去。
+
+这个轻量 bootstrap 位于：
+
+```text
+Assets/Editor/DeskLink/DeskLinkUnityMcpBootstrap.cs
+ProjectSettings/DeskLinkUnityMcp.json
 ```
 
-| 组件             | 位置（应用数据目录内）           | 管理方              |
-|------------------|----------------------------------|---------------------|
-| Desktop Commander | `<data>/commander/node_modules`   | `CommanderRuntime`  |
-| tunnel-client     | `<app>/tools/tunnel-client.exe`   | 下载 + 校验         |
-| 私有状态          | `<data>/.desklink`                | 配置 + DPAPI 密钥   |
+它**不会重新实现 Unity 自动化能力**，只负责控制该项目中的 upstream MCP for Unity transport。
 
-默认本地端口（特意避开 RDC-X 使用的 `47831–47834` 区间）：
+### Unity 项目模式
 
-- MCP 端点：`127.0.0.1:47933/mcp`
-- 健康 / 运维界面：`127.0.0.1:47934`
+- **自动（Auto）** —— 已批准项目运行时自动连接。
+- **手动（Manual）** —— 保留集成，但只在用户要求时启动 Provider。
+- **禁用（Disabled）** —— 该项目不启动 Unity Provider。
+
+Unity Editor 发生 Domain Reload 或 Bridge 短暂变化后，DeskLink 也会自动重连 stdio Provider。
+
+### 已验证的 Unity 能力
+
+当前集成已经通过真实 Editor 操作验证，包括：
+
+- 创建、保存、加载与读取 Scene。
+- 创建、复制、修改与删除 GameObject。
+- 添加与配置 Component。
+- 创建并分配 Material，包括 URP Material。
+- 创建与读取 Prefab。
+- 读取与清空 Unity Console。
+- 进入与退出 Play Mode。
+- 通过 upstream MCP 工具执行 Editor / Runtime C#。
+- 选择当前活动的 Unity Editor instance。
+
+开发期间还通过 MCP 构建过一个完整 Demo 场景，用于验证 Scene → GameObject → Component → Prefab → Play Mode → Physics Trigger → Console 的整条链路。
 
 ## 环境要求
 
-- **Windows 10+** —— `tunnel-client` 的自动安装仅支持 Windows。其他平台需自行把二进制放入 `tools/`。
-- 能访问 `api.openai.com` 的网络。
-- 已启用 **Secure MCP Tunnel** 的 OpenAI 组织。
+- **Windows 10+**
+- 能访问 OpenAI 服务的网络
+- 已启用 **Secure MCP Tunnel** 的 OpenAI 组织
+- 使用 Unity 集成时：**Unity 2021.3+**
+
+DeskLink 会在需要时管理自己的 Node.js、Desktop Commander，以及 Unity MCP 的 `uv/uvx` 运行时。
 
 ## 快速开始
 
-### 1. 创建隧道与运行时密钥
+### 1. 创建 OpenAI Tunnel
 
-1. 在 OpenAI 平台打开 **Tunnels**：<https://platform.openai.com/settings/organization/tunnels>
-2. 创建一个隧道并复制其 **Tunnel ID**（`tunnel_…`）。
-3. 创建一个 **Runtime API key**（不是 admin key）：<https://platform.openai.com/settings/organization/api-keys>
-4. 妥善保管该密钥——DeskLink 会用 DPAPI 加密保存它。
+1. 打开 OpenAI 平台的 **Tunnels**：<https://platform.openai.com/settings/organization/tunnels>
+2. 创建 Tunnel，并复制 **Tunnel ID**（`tunnel_…`）。
+3. 创建 **Runtime API key**：<https://platform.openai.com/settings/organization/api-keys>
 
 ### 2. 连接 DeskLink
 
-1. 安装并启动 **DeskLink**。
-2. 在 **隧道** 页面粘贴 Tunnel ID 与 Runtime API Key。
-3. 点击 **连接并启动（Connect & Start）**。
-4. 等待状态变为 **Ready**。这需要一次成功的控制面轮询——如果密钥错误，状态会停在"等待控制面（Waiting for control plane）"。
+1. 安装并启动 DeskLink。
+2. 打开 **Tunnel / 隧道** 页面。
+3. 输入 Tunnel ID 与 Runtime API Key。
+4. 点击 **Connect & Start / 连接并启动**。
+5. 等待控制面状态变成 **Ready**。
 
-### 3. 在 ChatGPT 中使用
+### 3. 在 ChatGPT 中连接
 
 1. 在 ChatGPT 打开 **设置 → Connectors**：<https://chatgpt.com/#settings/Connectors>
-2. 选择你创建的隧道。
-3. ChatGPT 现在可以调用你机器上的 Desktop Commander 工具（文件系统、Shell、进程等）。
+2. 选择你创建的 Tunnel。
+3. ChatGPT 现在可以使用 DeskLink 当前暴露的 Provider。
+
+### 4. 可选：启用 Unity
+
+1. 打开一个 Unity 项目。
+2. DeskLink 会自动检测运行中的项目。
+3. 出现提示时确认 **安装并启用**。
+4. 等待 Package Manager 导入和 Editor Bridge 连接完成。
+5. Unity 工具会自动加入同一个 MCP Gateway。
 
 ## 工作原理
 
-- `tunnel-client run` 启动时，通过环境变量注入你的控制面凭据，并指向本地 MCP 端点。
-- 守护进程暴露 `/healthz`（存活）和 `/readyz`（本地启动门槛：OAuth 发现 + MCP 探测）。DeskLink 还会额外执行 `tunnel-client health --require-control-plane-poll`，以确认凭据确实被控制面接受。
-- 守护进程在启动时只探测一次 MCP 上游；DeskLink 会先等待 Desktop Commander 开始监听，再启动隧道，因此 `/readyz` 不会被一次过期的探测卡住。
-- loopback 端点是一个进程内的轻量代理（`McpProxy` + `createDeskLinkMcpHandler`）：它原样镜像 Desktop Commander 的工具**与资源**定义，并把每个 `tools/call`、`resources/list`、`resources/read` 通过 stdio 转发给 Desktop Commander。
-- 同时服务两代 MCP 协议：新版客户端通过 `server/discover` 与 `2026-07-28` 请求格式握手，旧版客户端回退到 SDK 的无状态 `initialize`。
+- `tunnel-client run` 把 OpenAI 控制面连接到 DeskLink 本地 MCP 端点。
+- `ProviderManager` 管理所有活跃 MCP Provider，并构建合并后的 tools/resources 注册表。
+- 工具重名时会路由到对应的 Provider owner。
+- Desktop Commander 通过 stdio 连接。
+- Unity MCP 通过 stdio 连接，并与检测到的 Unity 项目 instance 匹配。
+- Provider 状态变化会自动刷新 Gateway 工具注册表，ChatGPT 不需要理解或手动切换 Provider。
+- Tunnel 健康流程同时验证本地 readiness 与控制面 poll 是否被接受。
 
 ## 配置
 
-状态保存在应用的用户数据目录（例如 `%APPDATA%\DeskLink`）：
+状态默认保存在 DeskLink 用户数据目录，通常是 `%APPDATA%\DeskLink`。
 
-- `config.json` —— Tunnel ID 与本地端口。
-- `tunnel-key.dpapi` —— 经 DPAPI 加密的 Runtime API Key。
+主要文件：
 
-如需重置，停止隧道并删除 `.desklink` 文件夹，然后重新输入凭据即可。
+- `config.json` —— Tunnel 配置与项目 / Provider 偏好。
+- `tunnel-key.dpapi` —— DPAPI 加密后的 Runtime API Key。
+- DeskLink 管理的私有运行时与缓存。
+
+Unity 项目级集成状态保存在项目自身的 `ProjectSettings/DeskLinkUnityMcp.json`。
 
 ## 开发
 
 ### 前置条件
 
-- Node.js 20+ 与 npm
-- `npm install`
-
-### 构建与运行
+- Node.js 20+
+- npm
 
 ```bash
-npm run build      # 将 TypeScript 编译到 dist/
-npm start          # 启动 Electron 应用（需先 build）
-npm run dev        # 构建并启动
-npm test           # 构建并运行单元测试（node:test）
+npm install
+npm run dev        # 生成图标、编译 TypeScript、启动 Electron
+npm test           # 构建并运行 node:test 测试
+npm run pack       # 生成 Windows unpacked 目录
+npm run dist       # 生成 NSIS 安装包 + zip
 ```
 
-### 打包
-
-```bash
-npm run dist       # electron-builder -> release/（nsis 安装包 + zip）
-```
+`npm run build` 会直接从当前 Electron runtime 的 `electron.exe` 中提取 Windows Icon Group，确保开发态与安装态图标一致。
 
 ## 安全说明
 
-Desktop Commander 能够读写你的文件系统并执行命令。请只把隧道连接到你信任、且由你掌控的 ChatGPT 账号。隧道端点绑定在 loopback，并拒绝任何非 `127.0.0.1`/`localhost` 的 `Host` 头；到控制面的流量是加密的出站隧道。Runtime API Key 使用 Windows DPAPI 加密，绝不以明文存储。
+Desktop Commander 和 Unity MCP 都属于高权限本地自动化 Provider。请只将 DeskLink 连接到你自己控制的 Tunnel 与 ChatGPT 账号。
+
+DeskLink MCP 端点只绑定 loopback，并拒绝非 loopback Host；Tunnel 流量是加密的出站连接。Runtime API Key 使用 Windows DPAPI 加密，不会以明文写入磁盘。
+
+第一次修改 Unity 项目并不是静默行为：DeskLink 会先询问用户，再安装 Unity Package 或项目 bootstrap。
 
 ## 许可证
 
-本项目基于 **ISC 许可证**（见 `package.json`）。随附的 `tunnel-client` 与 `cloudflared` 二进制各自带有许可证，详见 `tools/LICENSE` 与 `tools/NOTICE`。
+DeskLink 使用 **ISC License**（见 `package.json`）。
+
+随附或下载的第三方组件，包括 `tunnel-client`、`cloudflared`、Desktop Commander、MCP for Unity、Electron 及其依赖，继续遵循各自的许可证。

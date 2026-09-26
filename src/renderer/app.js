@@ -14,6 +14,7 @@ if (langChoice !== 'auto') i18n.setLocale(langChoice);
 const views = {
   overview: { title: t('viewOverview'), render: renderOverview },
   tunnel: { title: t('viewTunnel'), render: renderTunnel },
+  providers: { title: t('viewProviders'), render: renderProviders },
   tools: { title: t('viewTools'), render: renderTools },
   logs: { title: t('viewLogs'), render: renderLogs },
   diagnostics: { title: t('viewDiagnostics'), render: renderDiagnostics },
@@ -26,6 +27,7 @@ let status = { phase: 'idle', detail: '', toolCount: 0, endpoint: '', commanderV
 let tunnel = { installed: false, version: '', running: false, live: false, ready: false, connected: false, controlPlane: { ok: false, detail: '' }, proxy: '', tunnelId: '', hasKey: false, lastError: '', installing: false, message: '' };
 let logs = '';
 let tools = [];
+let providers = [];
 let diagnosis = null;
 let current = 'overview';
 /** True while a tunnel action (connect/install/stop) is awaiting a remote response. */
@@ -277,6 +279,100 @@ function renderTunnel() {
   return wrap;
 }
 
+function renderUnityProvider(provider) {
+  const meta = provider.meta || {};
+  const rows = el('div', 'rows');
+  rows.append(row(t('providerState'), phaseLabel(provider.phase)));
+  rows.append(row(t('unityProject'), meta.projectName || t('unityNoProject')));
+  if (meta.projectPath) rows.append(row(t('unityProjectPath'), meta.projectPath, true));
+  if (meta.unityVersion) rows.append(row(t('unityVersion'), meta.unityVersion, true));
+  const packageText = meta.packageInstalled
+    ? tl('unityPackageInstalled', { version: meta.packageVersion || '?' })
+    : meta.packageDeclared
+      ? (meta.packageResolved ? t('unityPackageResolved') : t('unityPackageResolving'))
+      : t('notInstalled');
+  rows.append(row(t('unityPackage'), packageText));
+  rows.append(row(t('unityIntegration'), meta.integrationInstalled
+    ? t('unityIntegrationInstalled')
+    : t('unityIntegrationMissing')));
+  rows.append(row(t('unityBridge'), meta.bridgeConnected ? t('unityConnected') : '—'));
+  rows.append(row(t('providerMode'), t('providerMode_' + (meta.projectMode || 'auto'))));
+  rows.append(row(t('providerTransport'), provider.transport || '—', true));
+  rows.append(row(t('rowToolCount'), String(provider.toolCount || 0)));
+  if (meta.uvAvailable) rows.append(row('uv', meta.uvVersion || t('installed'), true));
+  if (provider.detail) rows.append(row(t('providerDetail'), provider.detail));
+
+  const box = section(provider.name, rows);
+  const bar = el('div', 'toolbar');
+  const projectPath = meta.projectPath || undefined;
+
+  if (projectPath && (!meta.packageInstalled || !meta.packageCompatible || !meta.integrationInstalled)) {
+    const installLabel = !meta.packageInstalled
+      ? (meta.packageDeclared && meta.installationApproved ? t('unityRetryResolve') : t('unityInstallEnable'))
+      : !meta.packageCompatible
+        ? tl('unityUpdateEnable', { version: meta.packageTargetVersion || '?' })
+        : t('unityEnableIntegration');
+    bar.append(button(
+      installLabel,
+      async () => { await bridge.unityInstall(projectPath); return t('unityInstallStarted'); },
+      t('unityInstalling')
+    ));
+  }
+
+  if (projectPath && meta.packageInstalled && meta.packageCompatible && meta.integrationInstalled) {
+    const modes = el('div', 'segmented');
+    for (const mode of ['auto', 'manual', 'disabled']) {
+      const control = el('button', meta.projectMode === mode ? 'is-active' : '', t('providerMode_' + mode));
+      control.addEventListener('click', async () => {
+        try { await bridge.unitySetMode(mode, projectPath); }
+        catch (error) { setFeedback(t('failed') + String(error?.message ?? error), true); }
+      });
+      modes.append(control);
+    }
+    bar.append(modes);
+    if (meta.projectMode === 'manual' && provider.phase !== 'ready') {
+      bar.append(button(t('unityStart'), async () => {
+        await bridge.unityStart(projectPath);
+        return t('unityStarting');
+      }, t('unityStarting')));
+    }
+  }
+
+  bar.append(el('span', 'spacer'));
+  bar.append(button(t('unityRefresh'), async () => {
+    await bridge.unityRefresh();
+    return t('done');
+  }));
+  box.append(bar);
+  return box;
+}
+
+function renderProviders() {
+  const wrap = document.createDocumentFragment();
+  wrap.append(head(t('viewProviders'), t('providersSubtitle')));
+
+  if (!providers.length) {
+    wrap.append(el('div', 'empty', t('providersEmpty')));
+    return wrap;
+  }
+
+  for (const provider of providers) {
+    if (provider.id === 'unity') {
+      wrap.append(renderUnityProvider(provider));
+      continue;
+    }
+    const rows = el('div', 'rows');
+    rows.append(row(t('providerState'), phaseLabel(provider.phase)));
+    rows.append(row(t('providerMode'), t('providerMode_' + provider.mode)));
+    rows.append(row(t('providerTransport'), provider.transport || '—', true));
+    rows.append(row(t('providerVersion'), provider.version || '—', true));
+    rows.append(row(t('rowToolCount'), String(provider.toolCount || 0)));
+    if (provider.detail) rows.append(row(t('providerDetail'), provider.detail));
+    wrap.append(section(provider.name, rows));
+  }
+  return wrap;
+}
+
 function toolRow(tool) {
   const line = el('div', 'row');
   const name = el('div', 'row-value mono', tool.name);
@@ -391,6 +487,7 @@ function renderDiagnostics() {
 function refreshStrings() {
   views.overview.title = t('viewOverview');
   views.tunnel.title = t('viewTunnel');
+  views.providers.title = t('viewProviders');
   views.tools.title = t('viewTools');
   views.logs.title = t('viewLogs');
   views.diagnostics.title = t('viewDiagnostics');
@@ -568,6 +665,10 @@ bridge.onStatus(next => {
   show(current);
   if (next.phase === 'ready') void loadTools();
 });
+bridge.onProviders(next => {
+  providers = next;
+  if (current === 'providers') show(current);
+});
 bridge.onTunnel(next => {
   tunnel = next;
   updateTitleStatus();
@@ -592,6 +693,7 @@ bridge.onLog(line => {
   } catch {}
   if (!proxyDraft) proxyDraft = tunnel.proxy || '';
   try { appVersion = await bridge.appVersion(); } catch {}
+  try { providers = await bridge.getProviders(); } catch { providers = []; }
   updateTitleStatus();
 })();
 

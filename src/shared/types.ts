@@ -14,6 +14,21 @@ export type ToolSummary = {
   description: string;
 };
 
+export type ProviderMode = 'always' | 'auto' | 'manual' | 'disabled';
+export type ProviderPhase = 'idle' | 'starting' | 'ready' | 'error';
+
+export type ProviderSummary = {
+  id: string;
+  name: string;
+  phase: ProviderPhase;
+  mode: ProviderMode;
+  detail: string;
+  toolCount: number;
+  version?: string;
+  transport?: string;
+  meta?: Record<string, unknown>;
+};
+
 export type NodeStatus = {
   available: boolean;
   source: 'bundled' | 'system' | 'none';

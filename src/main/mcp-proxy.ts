@@ -1,75 +1,40 @@
 import express from 'express';
 import type { Server as HttpServer } from 'node:http';
-import type { CommanderRuntime } from './commander.js';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { toNodeHandler } from '@modelcontextprotocol/node';
-import type { McpHttpHandler, Tool } from '@modelcontextprotocol/server';
+import type { McpHttpHandler } from '@modelcontextprotocol/server';
 import { createDeskLinkMcpHandler } from './mcp-handler.js';
 import { tm } from './i18n.js';
-import { ProxyStatus, ToolSummary } from '../shared/types.js';
-
-
+import type { ProxyStatus, ToolSummary } from '../shared/types.js';
+import type { ProviderManager } from './providers/provider-manager.js';
+import type { DesktopCommanderProvider } from './providers/desktop-commander-provider.js';
 
 /**
- * DeskLink owns no capabilities of its own. It starts Desktop Commander over stdio, mirrors its
- * tool list, and forwards every tool call verbatim to the local loopback endpoint so the
- * OpenAI tunnel-client can reach it.
+ * Loopback MCP gateway exposed to tunnel-client. Capabilities are supplied by local providers
+ * (Desktop Commander today; Unity and other MCP servers can be added without changing this layer).
  */
 export class McpProxy {
-  private client: Client | null = null;
-  private transport: StdioClientTransport | null = null;
   private http: HttpServer | null = null;
   private mcpHandler: McpHttpHandler | null = null;
-  // Full tool definitions (name, description, inputSchema, …) passed through to the tunnel.
-  private tools: Tool[] = [];
-  private proxiesResources = false;
-  private commanderVersion = '';
-  private commanderLatest = '';
   private phase: ProxyStatus['phase'] = 'idle';
   private detail = '';
 
   constructor(
     private readonly port: number,
-    private readonly commander: CommanderRuntime,
+    private readonly providers: ProviderManager,
+    private readonly desktopCommander: DesktopCommanderProvider,
     private readonly onChange: (status: ProxyStatus) => void,
     private readonly onLog: (line: string) => void
   ) {}
 
   async start(): Promise<void> {
-    if (this.client) return;
-    this.emit('starting', this.commander.installedVersion ? tm('statusStartingCommander') : tm('statusPreparingCommander'));
+    if (this.http || this.phase === 'starting') return;
+    this.emit('starting', tm('statusPreparingCommander'));
 
-    await this.commander.ensureInstalled();
-    this.emit('starting', tm('statusStartingCommander'));
-    const { command, args } = this.commander.prepare();
-    this.transport = new StdioClientTransport({
-      command,
-      args,
-      stderr: 'pipe',
-      env: { ...process.env } as Record<string, string>
-    });
-    this.transport.stderr?.on('data', chunk => this.onLog(String(chunk)));
-
-    const client = new Client({ name: 'desklink', version: '0.1.0' });
     try {
-      await client.connect(this.transport);
-      const listed = await client.listTools();
-      // Mirror the full tool definitions. ChatGPT's MCP validation requires an inputSchema
-      // on every tool, so preserve it (and synthesize an empty one if a tool omits it).
-      this.tools = listed.tools.map(tool => ({
-        ...tool,
-        inputSchema: (tool as any).inputSchema ?? { type: 'object', properties: {} }
-      }));
-      this.proxiesResources = Boolean(client.getServerCapabilities()?.resources);
-      this.client = client;
-      // The MCP handshake reports the exact server implementation that answered.
-      const info = client.getServerVersion();
-      this.commanderVersion = String(info?.version ?? '');
-      this.onLog(`Desktop Commander ${this.commanderVersion || '(version unknown)'} ready with ${this.tools.length} tools.\n`);
+      await this.providers.start();
     } catch (error: any) {
       this.emit('error', String(error?.message ?? error));
-      await this.stop();
+      await this.providers.stop();
       return;
     }
 
@@ -77,22 +42,24 @@ export class McpProxy {
       await this.listen();
     } catch (error: any) {
       this.emit('error', `${tm('errListenFailed', { port: this.port })} — ${String(error?.message ?? error)}`);
+      await this.providers.stop();
       return;
     }
-    this.emit('ready', '');
-    void this.checkLatest();
+
+    const readyProviders = this.providers.statuses().filter(provider => provider.phase === 'ready');
+    if (readyProviders.length) {
+      this.emit('ready', '');
+      void this.checkLatest();
+    } else {
+      const failed = this.providers.statuses().find(provider => provider.phase === 'error');
+      this.emit('error', failed?.detail || 'No MCP providers are ready.');
+    }
   }
 
-  /** Resolves what `latest` currently points at, so the UI can show whether an update will upgrade. */
   async checkLatest(): Promise<string> {
-    try {
-      const value = this.commander.latestVersion();
-      if (/^\d+\.\d+\.\d+/.test(value)) this.commanderLatest = value;
-    } catch {
-      /* offline or npm unavailable — keep the previous value */
-    }
+    const latest = await this.desktopCommander.checkLatest();
     this.emit(this.phase, this.detail);
-    return this.commanderLatest;
+    return latest;
   }
 
   async stop(): Promise<void> {
@@ -102,20 +69,20 @@ export class McpProxy {
       this.http.closeAllConnections?.();
     });
     this.http = null;
+
     if (this.mcpHandler) await this.mcpHandler.close().catch(() => {});
     this.mcpHandler = null;
-    if (this.client) await this.client.close().catch(() => {});
-    this.client = null;
-    this.transport = null;
-    this.proxiesResources = false;
+    await this.providers.stop();
     this.emit('idle', '');
   }
 
   listTools(): ToolSummary[] {
-    return this.tools.map(t => ({ name: t.name, description: (t.description ?? '') as string }));
+    return this.providers.listTools().map(tool => ({
+      name: tool.name,
+      description: (tool.description ?? '') as string
+    }));
   }
 
-  /** Re-emits the current status, e.g. so cached text is re-rendered after a language switch. */
   pushStatus(): void {
     this.emit(this.phase, this.detail);
   }
@@ -126,21 +93,10 @@ export class McpProxy {
     app.use(express.json({ limit: '8mb' }));
 
     this.mcpHandler = createDeskLinkMcpHandler({
-      getTools: () => this.tools,
-      callTool: async params => {
-        if (!this.client) throw new Error('Desktop Commander is not running.');
-        return await this.client.callTool(params as any) as any;
-      },
-      ...(this.proxiesResources ? {
-        listResources: async (params: any) => {
-          if (!this.client) throw new Error('Desktop Commander is not running.');
-          return await this.client.listResources(params) as any;
-        },
-        readResource: async (params: any) => {
-          if (!this.client) throw new Error('Desktop Commander is not running.');
-          return await this.client.readResource(params) as any;
-        }
-      } : {}),
+      getTools: () => this.providers.listTools(),
+      callTool: params => this.providers.callTool(params),
+      listResources: params => this.providers.listResources(params),
+      readResource: params => this.providers.readResource(params),
       onError: error => this.onLog(`MCP request error: ${error.message}\n`)
     });
     const handleMcpRequest = toNodeHandler(this.mcpHandler, {
@@ -150,12 +106,13 @@ export class McpProxy {
 
     app.all('/mcp', async (req, res) => {
       const hosts = [`127.0.0.1:${this.port}`, `localhost:${this.port}`];
-      if (!req.headers.host || !hosts.includes(req.headers.host)) return res.status(403).json({ error: 'Loopback only.' });
+      if (!req.headers.host || !hosts.includes(req.headers.host)) {
+        return res.status(403).json({ error: 'Loopback only.' });
+      }
       await handleMcpRequest(req, res, req.body);
     });
 
-    // tunnel-client probes OAuth metadata during startup. Without this it receives Express'
-    // HTML 404 page and logs 'invalid character "<"'; a JSON 404 cleanly means "no OAuth here".
+    // tunnel-client probes OAuth metadata during startup. JSON 404 cleanly means no OAuth here.
     app.use((_req, res) => res.status(404).json({ error: 'not_found' }));
 
     await new Promise<void>((resolve, reject) => {
@@ -168,13 +125,14 @@ export class McpProxy {
   private emit(phase: ProxyStatus['phase'], detail: string): void {
     this.phase = phase;
     this.detail = detail;
+    const commander = this.desktopCommander.getStatus();
     this.onChange({
       phase,
       detail,
-      toolCount: this.tools.length,
+      toolCount: this.providers.listTools().length,
       endpoint: phase === 'ready' ? `http://127.0.0.1:${this.port}/mcp` : '',
-      commanderVersion: this.commanderVersion,
-      commanderLatest: this.commanderLatest
+      commanderVersion: commander.version ?? '',
+      commanderLatest: this.desktopCommander.latestVersion
     });
   }
 }
