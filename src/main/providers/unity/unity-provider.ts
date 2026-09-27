@@ -9,6 +9,7 @@ import type {
   Tool
 } from '@modelcontextprotocol/server';
 import type { Store, UnityProjectMode } from '../../store.js';
+import type { UnityCapabilityId, UnityCapabilityMode } from '../../../shared/types.js';
 import type { McpProvider, ProviderStatus } from '../provider.js';
 import { discoverUnityProjects, type UnityProjectInfo } from './unity-discovery.js';
 import { inspectUnityMcpPackage, installUnityMcpPackage, type UnityMcpPackageStatus } from './unity-package.js';
@@ -24,6 +25,16 @@ import {
   writeDeskLinkUnityConfig
 } from './unity-bootstrap.js';
 import { UvRuntime } from './uv-runtime.js';
+import {
+  UNITY_CAPABILITY_DEFINITIONS,
+  UNITY_CORE_CAPABILITY_DEFINITIONS,
+  UNITY_CORE_TOOL_NAMES,
+  findUnityCapability,
+  selectUnityTools,
+  type UnityCapabilityDecision,
+  type UnityCapabilityDefinition,
+  type UnityCapabilityRequest
+} from './unity-capabilities.js';
 
 const DISCOVERY_INTERVAL_MS = 5000;
 const BRIDGE_RECONNECT_MISSES = 3;
@@ -57,11 +68,13 @@ export class UnityProvider implements McpProvider {
   private connecting = false;
   private generation = 0;
   private readonly resolveRequestedProjects = new Set<string>();
+  private readonly temporaryCapabilities = new Set<UnityCapabilityId>();
   private onChange: () => void = () => {};
 
   constructor(
     private readonly store: Store,
-    private readonly onLog: (line: string) => void
+    private readonly onLog: (line: string) => void,
+    private readonly requestCapability?: (request: UnityCapabilityRequest) => Promise<UnityCapabilityDecision>
   ) {
     this.uv = new UvRuntime(store, onLog);
   }
@@ -86,6 +99,7 @@ export class UnityProvider implements McpProvider {
     this.activeProject = null;
     this.packageStatus = null;
     this.bridgeConnected = false;
+    this.temporaryCapabilities.clear();
     this.phase = 'idle';
     this.detail = '';
     this.onChange();
@@ -105,7 +119,7 @@ export class UnityProvider implements McpProvider {
       phase: this.phase,
       mode: this.mode,
       detail: this.detail,
-      toolCount: this.tools.length,
+      toolCount: this.listTools().length,
       version: this.client ? UNITY_MCP_VERSION : '',
       transport: 'stdio',
       meta: {
@@ -127,17 +141,46 @@ export class UnityProvider implements McpProvider {
         activeInstanceId: this.activeInstanceId,
         uvAvailable: uv.available,
         uvVersion: uv.version,
-        uvSource: uv.source
+        uvSource: uv.source,
+        upstreamToolCount: this.tools.length,
+        coreToolCount: this.tools.filter(tool => (UNITY_CORE_TOOL_NAMES as readonly string[]).includes(tool.name)).length,
+        coreCapabilities: UNITY_CORE_CAPABILITY_DEFINITIONS.map(capability => ({
+          id: capability.id,
+          label: capability.label,
+          description: capability.description,
+          toolCount: this.tools.filter(tool => capability.toolNames.includes(tool.name)).length
+        })),
+        capabilities: UNITY_CAPABILITY_DEFINITIONS.map(capability => ({
+          id: capability.id,
+          label: capability.label,
+          description: capability.description,
+          mode: this.capabilityMode(capability),
+          temporary: this.temporaryCapabilities.has(capability.id),
+          toolCount: capability.id === 'raw'
+            ? this.tools.length
+            : this.tools.filter(tool => capability.toolNames.includes(tool.name)).length
+        }))
       }
     };
   }
 
   listTools(): Tool[] {
-    return this.tools;
+    return selectUnityTools(this.tools, capability => this.capabilityMode(capability), this.temporaryCapabilities);
   }
+
   async callTool(params: { name: string; arguments?: Record<string, unknown> }): Promise<CallToolResult> {
     if (!this.client || this.phase !== 'ready') throw new Error('Unity MCP is not ready.');
+    if (params.name === 'unity_capabilities') return this.requestOptionalCapability(params.arguments);
     return await this.client.callTool(params as any) as any;
+  }
+
+  setCapabilityMode(id: UnityCapabilityId, mode: UnityCapabilityMode): ProviderStatus {
+    if (!findUnityCapability(id)) throw new Error(`Unknown Unity capability: ${id}`);
+    if (!['on', 'ask', 'off'].includes(mode)) throw new Error(`Invalid Unity capability mode: ${mode}`);
+    this.store.saveUnityCapabilityMode(id, mode);
+    this.temporaryCapabilities.delete(id);
+    this.onChange();
+    return this.getStatus();
   }
 
   async listResources(params?: ListResourcesRequest['params']): Promise<ListResourcesResult> {
@@ -212,6 +255,53 @@ export class UnityProvider implements McpProvider {
     return this.getStatus();
   }
 
+  private capabilityMode(capability: UnityCapabilityDefinition): UnityCapabilityMode {
+    return this.store.getUnityCapabilityMode(capability.id) ?? capability.defaultMode;
+  }
+
+  private capabilityEnabled(id: UnityCapabilityId): boolean {
+    const capability = findUnityCapability(id);
+    return Boolean(capability && (this.temporaryCapabilities.has(id) || this.capabilityMode(capability) === 'on'));
+  }
+
+  private askCapabilities(): UnityCapabilityDefinition[] {
+    if (this.capabilityEnabled('raw')) return [];
+    return UNITY_CAPABILITY_DEFINITIONS.filter(capability =>
+      !this.temporaryCapabilities.has(capability.id) && this.capabilityMode(capability) === 'ask'
+    );
+  }
+
+  private async requestOptionalCapability(args?: Record<string, unknown>): Promise<CallToolResult> {
+    const id = String(args?.capability ?? '') as UnityCapabilityId;
+    const capability = findUnityCapability(id);
+    if (!capability || !this.askCapabilities().some(candidate => candidate.id === id)) {
+      return this.capabilityResult(false, id, 'unavailable', 'That capability is not currently available in Ask mode.');
+    }
+
+    const toolNames = capability.id === 'raw' ? this.tools.map(tool => tool.name) : [...capability.toolNames];
+    const decision = this.requestCapability
+      ? await this.requestCapability({
+          id, label: capability.label, description: capability.description, toolNames,
+          projectName: this.activeProject?.projectName ?? 'Unity'
+        })
+      : 'deny';
+
+    if (decision === 'always') this.store.saveUnityCapabilityMode(id, 'on');
+    else if (decision === 'once') this.temporaryCapabilities.add(id);
+    else return this.capabilityResult(false, id, 'denied', `Unity ${capability.label} was not enabled.`);
+
+    this.onChange();
+    const scope = decision === 'always' ? 'always' : 'session';
+    return this.capabilityResult(true, id, scope, `Unity ${capability.label} is now enabled (${scope}).`);
+  }
+
+  private capabilityResult(success: boolean, capability: string, status: string, message: string): CallToolResult {
+    return {
+      content: [{ type: 'text', text: message }],
+      structuredContent: { success, capability, status, message }
+    } as CallToolResult;
+  }
+
   private async refresh(): Promise<void> {
     if (this.refreshing) return;
     this.refreshing = true;
@@ -226,6 +316,7 @@ export class UnityProvider implements McpProvider {
         this.activeProject = null;
         this.packageStatus = null;
         this.bridgeConnected = false;
+        this.temporaryCapabilities.clear();
         this.phase = 'idle';
         this.detail = 'No running Unity project detected.';
         this.onChange();
@@ -235,6 +326,7 @@ export class UnityProvider implements McpProvider {
       if (!this.activeProject || !samePath(this.activeProject.projectPath, next.projectPath)) {
         this.generation++;
         await this.closeRuntime();
+        this.temporaryCapabilities.clear();
         this.activeProject = next;
       } else {
         this.activeProject = next;

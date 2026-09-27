@@ -11,6 +11,7 @@ import type {
 import type { CommanderRuntime } from '../commander.js';
 import { tm } from '../i18n.js';
 import type { McpProvider, ProviderStatus } from './provider.js';
+import { summarizeDesktopCommanderCapabilities } from './desktop-commander-capabilities.js';
 
 export class DesktopCommanderProvider implements McpProvider {
   readonly id = 'desktop-commander';
@@ -96,7 +97,11 @@ export class DesktopCommanderProvider implements McpProvider {
       detail: this.detail,
       toolCount: this.tools.length,
       version: this.version,
-      transport: 'stdio'
+      transport: 'stdio',
+      meta: {
+        latestVersion: this.latest,
+        capabilities: summarizeDesktopCommanderCapabilities(this.tools.map(tool => tool.name))
+      }
     };
   }
 
@@ -121,7 +126,10 @@ export class DesktopCommanderProvider implements McpProvider {
   async checkLatest(): Promise<string> {
     try {
       const value = this.commander.latestVersion();
-      if (/^\d+\.\d+\.\d+/.test(value)) this.latest = value;
+      if (/^\d+\.\d+\.\d+/.test(value)) {
+        this.latest = value;
+        this.onChange();
+      }
     } catch {
       // Offline or npm unavailable: retain the previous known value.
     }

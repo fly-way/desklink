@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { ProviderSummary, ProxyStatus, TunnelStatus, ToolSummary } from '../shared/types.js';
+import type {
+  ProviderSummary, ProxyStatus, TunnelStatus, UnityCapabilityId, UnityCapabilityMode
+} from '../shared/types.js';
 
 contextBridge.exposeInMainWorld('desklink', {
   platform: process.platform,
@@ -34,7 +36,6 @@ contextBridge.exposeInMainWorld('desklink', {
     ipcRenderer.on('desklink:log', handler);
     return () => ipcRenderer.removeListener('desklink:log', handler);
   },
-  getTools: (): Promise<ToolSummary[]> => ipcRenderer.invoke('desklink:tools'),
   getProviders: (): Promise<ProviderSummary[]> => ipcRenderer.invoke('desklink:providers'),
   unityRefresh: (): Promise<ProviderSummary | null> => ipcRenderer.invoke('desklink:unity-refresh'),
   unityInstall: (projectPath?: string): Promise<ProviderSummary | null> =>
@@ -43,6 +44,8 @@ contextBridge.exposeInMainWorld('desklink', {
     ipcRenderer.invoke('desklink:unity-start', projectPath),
   unitySetMode: (mode: 'auto' | 'manual' | 'disabled', projectPath?: string): Promise<ProviderSummary | null> =>
     ipcRenderer.invoke('desklink:unity-mode', { mode, projectPath }),
+  unitySetCapabilityMode: (id: UnityCapabilityId, mode: UnityCapabilityMode): Promise<ProviderSummary | null> =>
+    ipcRenderer.invoke('desklink:unity-capability-mode', { id, mode }),
   getLogs: (): Promise<string> => ipcRenderer.invoke('desklink:logs'),
   appVersion: (): Promise<string> => ipcRenderer.invoke('desklink:app-version'),
   checkAppUpdate: (): Promise<{ latest?: string; error?: string }> => ipcRenderer.invoke('desklink:app-update'),

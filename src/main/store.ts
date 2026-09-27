@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { protectSecret, unprotectSecret } from './secrets.js';
+import type { UnityCapabilityId, UnityCapabilityMode } from '../shared/types.js';
 
 export type UnityProjectMode = 'auto' | 'manual' | 'disabled';
 
@@ -17,6 +18,7 @@ export type AppConfig = {
   /** Optional outbound proxy for tunnel-client, e.g. "7897" or "http://127.0.0.1:7897". */
   proxy?: string;
   unityProjects?: Record<string, UnityProjectPreference>;
+  unityCapabilities?: Partial<Record<UnityCapabilityId, UnityCapabilityMode>>;
 };
 
 // 47933/47934 keep DeskLink clear of the 47831-47834 range used by RDC-X.
@@ -62,6 +64,14 @@ export class Store {
     const next = { ...current, ...value };
     this.saveConfig({ unityProjects: { ...(this.config.unityProjects ?? {}), [key]: next } });
     return next;
+  }
+
+  getUnityCapabilityMode(id: UnityCapabilityId): UnityCapabilityMode | undefined {
+    return this.config.unityCapabilities?.[id];
+  }
+
+  saveUnityCapabilityMode(id: UnityCapabilityId, mode: UnityCapabilityMode): void {
+    this.saveConfig({ unityCapabilities: { ...(this.config.unityCapabilities ?? {}), [id]: mode } });
   }
 
   get tunnelId(): string {

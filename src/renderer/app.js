@@ -15,7 +15,6 @@ const views = {
   overview: { title: t('viewOverview'), render: renderOverview },
   tunnel: { title: t('viewTunnel'), render: renderTunnel },
   providers: { title: t('viewProviders'), render: renderProviders },
-  tools: { title: t('viewTools'), render: renderTools },
   logs: { title: t('viewLogs'), render: renderLogs },
   diagnostics: { title: t('viewDiagnostics'), render: renderDiagnostics },
   settings: { title: t('viewSettings'), render: renderSettings }
@@ -26,7 +25,6 @@ let phaseText = { idle: t('phaseIdle'), starting: t('phaseStarting'), ready: t('
 let status = { phase: 'idle', detail: '', toolCount: 0, endpoint: '', commanderVersion: '', commanderLatest: '' };
 let tunnel = { installed: false, version: '', running: false, live: false, ready: false, connected: false, controlPlane: { ok: false, detail: '' }, proxy: '', tunnelId: '', hasKey: false, lastError: '', installing: false, message: '' };
 let logs = '';
-let tools = [];
 let providers = [];
 let diagnosis = null;
 let current = 'overview';
@@ -279,6 +277,215 @@ function renderTunnel() {
   return wrap;
 }
 
+function closeCapabilityModal() {
+  document.getElementById('capabilityModal')?.remove();
+}
+
+function syncUnityCapabilityItem(item, capability, core = false) {
+  if (!item || !capability) return;
+  const effectiveMode = core ? 'on' : (capability.temporary ? 'on' : capability.mode);
+  item.querySelectorAll('.capability-modes button').forEach(control => {
+    control.classList.toggle('is-active', control.dataset.mode === effectiveMode);
+    control.disabled = core;
+  });
+  const existingSession = item.querySelector('.capability-session');
+  if (capability.temporary && !core) {
+    if (!existingSession) {
+      item.querySelector('.capability-copy')?.append(el('div', 'capability-session', t('unityCapabilityTemporary')));
+    }
+  } else {
+    existingSession?.remove();
+  }
+}
+
+function syncUnityCapabilityModal(provider) {
+  const modal = document.getElementById('capabilityModal');
+  if (!modal || modal.dataset.provider !== 'unity' || !provider) return;
+  const meta = provider.meta || {};
+  const core = Array.isArray(meta.coreCapabilities) ? meta.coreCapabilities : [];
+  const optional = Array.isArray(meta.capabilities) ? meta.capabilities : [];
+  for (const capability of core) {
+    syncUnityCapabilityItem(
+      modal.querySelector(`.capability-item[data-capability-id="${capability.id}"]`),
+      capability,
+      true
+    );
+  }
+  for (const capability of optional) {
+    syncUnityCapabilityItem(
+      modal.querySelector(`.capability-item[data-capability-id="${capability.id}"]`),
+      capability,
+      false
+    );
+  }
+}
+
+function unityCapabilityControl(capability, core = false) {
+  const modes = el('div', 'segmented capability-modes');
+  const effectiveMode = core ? 'on' : (capability.temporary ? 'on' : capability.mode);
+  for (const mode of ['on', 'ask', 'off']) {
+    const control = el('button', effectiveMode === mode ? 'is-active' : '', t('unityCapability' + mode[0].toUpperCase() + mode.slice(1)));
+    control.dataset.mode = mode;
+    control.disabled = core;
+    if (!core) {
+      control.addEventListener('click', async () => {
+        try {
+          const next = await bridge.unitySetCapabilityMode(capability.id, mode);
+          if (next) {
+            providers = providers.map(provider => provider.id === 'unity' ? next : provider);
+            syncUnityCapabilityModal(next);
+          }
+        } catch (error) {
+          setFeedback(t('failed') + String(error?.message ?? error), true);
+        }
+      });
+    }
+    modes.append(control);
+  }
+  return modes;
+}
+
+function unityCapabilityItem(capability, core = false) {
+  const item = el('div', 'capability-item');
+  item.dataset.capabilityId = capability.id;
+  const copy = el('div', 'capability-copy');
+  const nameKey = core ? 'unityCoreCapability_' + capability.id : 'unityCapability_' + capability.id;
+  const descKey = core ? 'unityCoreCapabilityDesc_' + capability.id : 'unityCapabilityDesc_' + capability.id;
+  copy.append(el('div', 'capability-name', t(nameKey)));
+  copy.append(el('div', 'capability-description', t(descKey)));
+  if (capability.temporary) copy.append(el('div', 'capability-session', t('unityCapabilityTemporary')));
+  item.append(copy, unityCapabilityControl(capability, core));
+  return item;
+}
+
+function openUnityCapabilities() {
+  closeCapabilityModal();
+  const provider = providers.find(item => item.id === 'unity');
+  if (!provider) return;
+  const meta = provider.meta || {};
+  const core = Array.isArray(meta.coreCapabilities) ? meta.coreCapabilities : [];
+  const optional = Array.isArray(meta.capabilities) ? meta.capabilities : [];
+
+  const backdrop = el('div', 'capability-modal-backdrop');
+  backdrop.id = 'capabilityModal';
+  backdrop.dataset.provider = 'unity';
+  backdrop.addEventListener('mousedown', event => { if (event.target === backdrop) closeCapabilityModal(); });
+
+  const panel = el('div', 'capability-modal');
+  const header = el('div', 'capability-modal-header');
+  const heading = el('div');
+  heading.append(el('h2', null, t('unityCapabilitiesTitle')));
+  heading.append(el('p', null, t('unityCapabilitiesSubtitle')));
+  const close = el('button', 'capability-close', '×');
+  close.title = t('winClose');
+  close.setAttribute('aria-label', t('winClose'));
+  close.addEventListener('click', closeCapabilityModal);
+  header.append(heading, close);
+  panel.append(header);
+  panel.append(el('div', 'note capability-help', t('unityCapabilitiesNote')));
+
+  const body = el('div', 'capability-modal-body');
+  const coreSection = el('section', 'capability-group');
+  coreSection.append(el('h3', null, t('unityCapabilitiesCore')));
+  coreSection.append(el('p', 'capability-group-note', t('unityCapabilitiesCoreNote')));
+  const coreList = el('div', 'capability-list');
+  for (const capability of core) coreList.append(unityCapabilityItem(capability, true));
+  coreSection.append(coreList);
+  body.append(coreSection);
+
+  const optionalSection = el('section', 'capability-group');
+  optionalSection.append(el('h3', null, t('unityCapabilitiesOptional')));
+  optionalSection.append(el('p', 'capability-group-note', t('unityCapabilitiesOptionalNote')));
+  const optionalList = el('div', 'capability-list');
+  for (const capability of optional) optionalList.append(unityCapabilityItem(capability, false));
+  optionalSection.append(optionalList);
+  body.append(optionalSection);
+  panel.append(body);
+  backdrop.append(panel);
+  document.body.append(backdrop);
+}
+
+function desktopCommanderCapabilityItem(capability) {
+  const item = el('div', 'capability-item');
+  const copy = el('div', 'capability-copy');
+  copy.append(el('div', 'capability-name', t('dcCapability_' + capability.id)));
+  copy.append(el('div', 'capability-description', t('dcCapabilityDesc_' + capability.id)));
+  item.append(copy);
+  item.append(el('div', 'capability-count', tl('dcCapabilityToolCount', { n: capability.toolCount || 0 })));
+  return item;
+}
+
+function openDesktopCommanderCapabilities() {
+  closeCapabilityModal();
+  const provider = providers.find(item => item.id === 'desktop-commander');
+  if (!provider) return;
+  const capabilities = Array.isArray(provider.meta?.capabilities) ? provider.meta.capabilities : [];
+
+  const backdrop = el('div', 'capability-modal-backdrop');
+  backdrop.id = 'capabilityModal';
+  backdrop.dataset.provider = 'desktop-commander';
+  backdrop.addEventListener('mousedown', event => { if (event.target === backdrop) closeCapabilityModal(); });
+
+  const panel = el('div', 'capability-modal');
+  const header = el('div', 'capability-modal-header');
+  const heading = el('div');
+  heading.append(el('h2', null, t('dcCapabilitiesTitle')));
+  heading.append(el('p', null, t('dcCapabilitiesSubtitle')));
+  const close = el('button', 'capability-close', '×');
+  close.title = t('winClose');
+  close.setAttribute('aria-label', t('winClose'));
+  close.addEventListener('click', closeCapabilityModal);
+  header.append(heading, close);
+  panel.append(header);
+  panel.append(el('div', 'note capability-help', t('dcCapabilitiesNote')));
+
+  const body = el('div', 'capability-modal-body');
+  const list = el('div', 'capability-list');
+  for (const capability of capabilities) list.append(desktopCommanderCapabilityItem(capability));
+  if (!capabilities.length) list.append(el('div', 'empty', t('dcCapabilitiesUnavailable')));
+  body.append(list);
+  panel.append(body);
+  backdrop.append(panel);
+  document.body.append(backdrop);
+}
+
+function renderDesktopCommanderProvider(provider) {
+  const latest = status.commanderLatest || provider.meta?.latestVersion || '';
+  const currentVersion = provider.version || status.commanderVersion || '';
+  const rows = el('div', 'rows');
+  rows.append(row(t('providerState'), phaseLabel(provider.phase)));
+  rows.append(row(t('providerMode'), t('providerMode_' + provider.mode)));
+  rows.append(row(t('providerTransport'), provider.transport || '—', true));
+  rows.append(row(t('rowRunningVersion'), currentVersion || '—', true));
+  rows.append(row(t('rowLatestVersion'), latest || t('notChecked'), true));
+  rows.append(row(
+    t('rowUpdate'),
+    !latest ? t('notChecked') : currentVersion === latest ? t('upToDate') : tl('dcUpdateAvailable', { latest })
+  ));
+  rows.append(row(t('rowToolCount'), String(provider.toolCount || 0)));
+  if (provider.detail) rows.append(row(t('providerDetail'), provider.detail));
+
+  const box = section(provider.name, rows);
+  const bar = el('div', 'toolbar');
+  const capabilities = el('button', 'btn', t('dcManageCapabilities'));
+  capabilities.addEventListener('click', openDesktopCommanderCapabilities);
+  bar.append(capabilities);
+  bar.append(button(t('btnCheckUpdate'), async () => {
+    const value = await bridge.checkCommanderUpdate();
+    if (value) status.commanderLatest = value;
+    show(current);
+    return value ? tl('latestAvailable', { latest: value }) : t('checkUpdateFailed');
+  }, t('checking')));
+  if (latest && currentVersion && latest !== currentVersion) {
+    bar.append(button(t('btnUpdateCommander'), async () => {
+      await bridge.restart();
+      return t('updatedLatest');
+    }, t('restarting')));
+  }
+  box.append(bar);
+  return box;
+}
+
 function renderUnityProvider(provider) {
   const meta = provider.meta || {};
   const rows = el('div', 'rows');
@@ -306,6 +513,14 @@ function renderUnityProvider(provider) {
   const bar = el('div', 'toolbar');
   const projectPath = meta.projectPath || undefined;
 
+  const capabilities = el('button', 'btn', t('unityManageCapabilities'));
+  capabilities.addEventListener('click', openUnityCapabilities);
+  bar.append(capabilities);
+  bar.append(button(t('unityRefresh'), async () => {
+    await bridge.unityRefresh();
+    return t('done');
+  }));
+
   if (projectPath && (!meta.packageInstalled || !meta.packageCompatible || !meta.integrationInstalled)) {
     const installLabel = !meta.packageInstalled
       ? (meta.packageDeclared && meta.installationApproved ? t('unityRetryResolve') : t('unityInstallEnable'))
@@ -319,8 +534,9 @@ function renderUnityProvider(provider) {
     ));
   }
 
+  let modes = null;
   if (projectPath && meta.packageInstalled && meta.packageCompatible && meta.integrationInstalled) {
-    const modes = el('div', 'segmented');
+    modes = el('div', 'segmented');
     for (const mode of ['auto', 'manual', 'disabled']) {
       const control = el('button', meta.projectMode === mode ? 'is-active' : '', t('providerMode_' + mode));
       control.addEventListener('click', async () => {
@@ -329,7 +545,6 @@ function renderUnityProvider(provider) {
       });
       modes.append(control);
     }
-    bar.append(modes);
     if (meta.projectMode === 'manual' && provider.phase !== 'ready') {
       bar.append(button(t('unityStart'), async () => {
         await bridge.unityStart(projectPath);
@@ -339,10 +554,7 @@ function renderUnityProvider(provider) {
   }
 
   bar.append(el('span', 'spacer'));
-  bar.append(button(t('unityRefresh'), async () => {
-    await bridge.unityRefresh();
-    return t('done');
-  }));
+  if (modes) bar.append(modes);
   box.append(bar);
   return box;
 }
@@ -357,6 +569,10 @@ function renderProviders() {
   }
 
   for (const provider of providers) {
+    if (provider.id === 'desktop-commander') {
+      wrap.append(renderDesktopCommanderProvider(provider));
+      continue;
+    }
     if (provider.id === 'unity') {
       wrap.append(renderUnityProvider(provider));
       continue;
@@ -370,53 +586,6 @@ function renderProviders() {
     if (provider.detail) rows.append(row(t('providerDetail'), provider.detail));
     wrap.append(section(provider.name, rows));
   }
-  return wrap;
-}
-
-function toolRow(tool) {
-  const line = el('div', 'row');
-  const name = el('div', 'row-value mono', tool.name);
-  name.style.flex = '0 0 200px';
-  line.append(name);
-  line.append(el('div', 'row-value dim', tool.description || '—'));
-  return line;
-}
-
-function updateNote() {
-  const version = status.commanderVersion;
-  const latest = status.commanderLatest;
-  if (!version || !latest) return t('notChecked');
-  if (version === latest) return t('upToDate');
-  return tl('updateAvailable', { latest });
-}
-
-function renderTools() {
-  const wrap = document.createDocumentFragment();
-  wrap.append(head(t('viewTools'), t('toolsSubtitle')));
-
-  const rows = el('div', 'rows');
-  rows.append(row(t('rowRunningVersion'), status.commanderVersion || '—', true));
-  rows.append(row(t('rowLatestVersion'), status.commanderLatest || '—', true));
-  rows.append(row(t('rowUpdate'), updateNote()));
-  wrap.append(section('Desktop Commander', rows));
-
-  const bar = el('div', 'toolbar');
-  bar.append(button(t('btnCheckUpdate'), async () => {
-    const latest = await bridge.checkCommanderUpdate();
-    return latest ? tl('latestAvailable', { latest }) : t('checkUpdateFailed');
-  }, t('checking')));
-  bar.append(button(t('btnUpdateCommander'), async () => {
-    await bridge.restart();
-    return t('updatedLatest');
-  }, t('restarting')));
-  bar.append(el('span', 'spacer'));
-  bar.append(el('span', 'muted', t('noteVersionResolve')));
-  wrap.append(bar);
-
-  const list = el('div', 'rows');
-  if (tools.length) for (const tool of tools) list.append(toolRow(tool));
-  else list.append(el('div', 'empty', t('emptyTools')));
-  wrap.append(section(tl('secTools', { n: tools.length }), list));
   return wrap;
 }
 
@@ -488,7 +657,6 @@ function refreshStrings() {
   views.overview.title = t('viewOverview');
   views.tunnel.title = t('viewTunnel');
   views.providers.title = t('viewProviders');
-  views.tools.title = t('viewTools');
   views.logs.title = t('viewLogs');
   views.diagnostics.title = t('viewDiagnostics');
   views.settings.title = t('viewSettings');
@@ -613,11 +781,6 @@ function updateTitleStatus() {
   text.textContent = ready ? t('titleReady') : connecting ? t('titleConnecting') : tunnel.connected ? t('titleTunnelReady') : commanderText();
 }
 
-async function loadTools() {
-  try { tools = await bridge.getTools(); } catch { tools = []; }
-  if (current === 'tools') show('tools');
-}
-
 (function enableDragging() {
   const bars = [document.querySelector('.titlebar')].filter(Boolean);
   const THRESHOLD = 4;
@@ -651,6 +814,10 @@ async function loadTools() {
 
 })();
 
+window.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && document.getElementById('capabilityModal')) closeCapabilityModal();
+});
+
 document.querySelectorAll('.side-item').forEach(node => {
   node.addEventListener('click', () => show(node.dataset.view));
 });
@@ -663,11 +830,20 @@ bridge.onStatus(next => {
   updateTitleStatus();
   if (isTyping()) return;
   show(current);
-  if (next.phase === 'ready') void loadTools();
 });
 bridge.onProviders(next => {
+  const modal = document.getElementById('capabilityModal');
+  const modalProvider = modal?.dataset.provider || '';
+  const scrollTop = document.querySelector('.capability-modal-body')?.scrollTop || 0;
   providers = next;
   if (current === 'providers') show(current);
+  if (modalProvider === 'unity') {
+    syncUnityCapabilityModal(next.find(provider => provider.id === 'unity'));
+  } else if (modalProvider === 'desktop-commander') {
+    openDesktopCommanderCapabilities();
+    const body = document.querySelector('.capability-modal-body');
+    if (body) body.scrollTop = scrollTop;
+  }
 });
 bridge.onTunnel(next => {
   tunnel = next;
@@ -701,4 +877,3 @@ bridge.onLog(line => {
 bridge.setLocale(i18n.locale);
 updateTitleStatus();
 show('overview');
-void loadTools();

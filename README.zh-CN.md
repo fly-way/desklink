@@ -18,8 +18,9 @@ English documentation: [README.md](README.md)
 - **Unity Editor 集成** —— 自动检测正在运行的 Unity 项目，并可按项目安装和管理固定版本的 `MCP for Unity`。
 - **Provider 生命周期管理** —— Unity 项目支持 **自动 / 手动 / 禁用** 三种模式。
 - **动态能力路由** —— Provider Ready 后才暴露工具；某个 Provider 失败不会拖垮其他 Provider。
+- **面向上下文的 Unity 暴露策略** —— 高频 Unity 工具常驻，低频能力组通过 **On / Ask / Off** 控制，减少模型长期携带的 tool schema。
 - **官方 OpenAI 隧道** —— 使用 OpenAI `tunnel-client`，只建立出站连接。
-- **完整 MCP 透传** —— 保留工具 schema，并转发 `tools/call`、`resources/list`、`resources/read`。
+- **保留 Schema 的 MCP 路由** —— 对已暴露工具保留 upstream schema，并转发 `tools/call`、`resources/list`、`resources/read`。
 - **兼容新旧 MCP** —— 同时支持新版 `2026-07-28` 请求格式与旧版无状态 `initialize` 客户端。
 - **控制面感知健康状态** —— “Ready” 表示真实 OpenAI 控制面轮询成功，而不只是本地 daemon 已启动。
 - **安全保存凭据** —— Runtime API Key 使用 **Windows DPAPI** 加密，不以明文落盘。
@@ -61,6 +62,8 @@ DeskLink 的本地端点只绑定 loopback。
 
 Gateway 会把当前活跃 Provider 合并成一份工具注册表。即使某个 Provider 启动失败，其他健康 Provider 仍保持可用。
 
+**Providers** 页面同时承担各 Provider 的能力管理入口。Desktop Commander 会直接显示当前版本、最新版本、更新状态与更新操作，并通过只读的 **AI 能力…** 面板按“文件与编辑 / 搜索 / 终端会话 / 系统进程 / 配置 / 使用记录与诊断 / 辅助功能”等能力组展示它能做什么；Unity 则在同一页面管理 **AI 能力…** 暴露策略。UI 不再保留单独的 Tools 页面。
+
 ## Unity 集成
 
 DeskLink 当前固定使用 **MCP for Unity 10.2.0**。
@@ -92,6 +95,12 @@ ProjectSettings/DeskLinkUnityMcp.json
 - **禁用（Disabled）** —— 该项目不启动 Unity Provider。
 
 Unity Editor 发生 Domain Reload 或 Bridge 短暂变化后，DeskLink 也会自动重连 stdio Provider。
+
+### Unity AI 能力暴露
+
+DeskLink 默认只常驻一组高频 Unity Core 工具，低频 upstream 工具按能力组使用 **On / Ask / Off** 控制。Unity Provider 页面本身保持简洁，点击 **AI 能力…** 后才打开完整能力列表、用途说明与开关；Core 能力也会列出，但固定为始终启用且不可关闭。**On** 直接暴露可选能力组的真实 MCP 工具；**Ask** 不暴露这些工具的 schema，只通过很小的 `unity_capabilities` 请求工具按需申请；**Off** 则完全隐藏。没有任何 Ask 能力时，`unity_capabilities` 本身也不会出现在工具列表中。
+
+可选能力组默认是 **Ask**；**Raw MCP** 默认 **Off**，仅在调试时用于恢复完整 upstream 工具面。Ask 请求可选择“本次允许 / 始终允许 / 拒绝”。修改状态会立即重建 DeskLink tool registry，后续 `tools/list` 请求无需重启 Provider 就能看到新的暴露面。
 
 ### 已验证的 Unity 能力
 

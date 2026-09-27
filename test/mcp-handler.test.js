@@ -152,3 +152,27 @@ test('keeps the stateless MCP 2025 initialize flow working', async t => {
   assert.match(body, /"protocolVersion":"2025-11-25"/);
   assert.match(body, /"serverInfo":\{"name":"desklink","version":"0.1.0"\}/);
 });
+
+test('tools/list reads the current tool registry on every request', async t => {
+  let currentTools = [{
+    name: 'unity_scene',
+    description: 'Scene operations.',
+    inputSchema: { type: 'object', properties: {} }
+  }];
+  const handler = createDeskLinkMcpHandler({
+    getTools: () => currentTools,
+    callTool: async () => ({ content: [] })
+  });
+  t.after(() => handler.close());
+
+  const first = await (await handler.fetch(modernRequest('tools/list'))).json();
+  assert.deepEqual(first.result.tools.map(tool => tool.name), ['unity_scene']);
+
+  currentTools = [...currentTools, {
+    name: 'manage_animation',
+    description: 'Animation operations.',
+    inputSchema: { type: 'object', properties: {} }
+  }];
+  const second = await (await handler.fetch(modernRequest('tools/list'))).json();
+  assert.deepEqual(second.result.tools.map(tool => tool.name), ['unity_scene', 'manage_animation']);
+});

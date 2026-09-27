@@ -6,10 +6,13 @@ import { NodeRuntime } from './node.js';
 import { DesktopCommanderProvider } from './providers/desktop-commander-provider.js';
 import { ProviderManager } from './providers/provider-manager.js';
 import { UnityProvider } from './providers/unity/unity-provider.js';
+import type { UnityCapabilityDecision, UnityCapabilityRequest } from './providers/unity/unity-capabilities.js';
 import { Store, type UnityProjectMode } from './store.js';
 import { TunnelRuntime } from './tunnel.js';
 import { setLocale, tm } from './i18n.js';
-import type { ProviderSummary, ProxyStatus, TunnelStatus } from '../shared/types.js';
+import type {
+  ProviderSummary, ProxyStatus, TunnelStatus, UnityCapabilityId, UnityCapabilityMode
+} from '../shared/types.js';
 
 // Runtime state (config, DPAPI key, tunnel-client) must live outside the read-only asar.
 const root = app.getPath('userData');
@@ -63,6 +66,27 @@ function needsUnitySetupPrompt(provider: ProviderSummary): boolean {
   if (meta.projectMode === 'disabled') return false;
   if (meta.installationApproved && meta.packageDeclared && !meta.packageInstalled) return false;
   return !meta.packageInstalled || !meta.packageCompatible || !meta.integrationInstalled;
+}
+
+async function requestUnityCapability(request: UnityCapabilityRequest): Promise<UnityCapabilityDecision> {
+  showMainWindow();
+  const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  const options: Electron.MessageBoxOptions = {
+    type: 'question',
+    title: tm('unityCapabilityRequestTitle'),
+    message: tm('unityCapabilityRequestMessage', { capability: tm(`unityCapability_${request.id}`) }),
+    detail: tm('unityCapabilityRequestDetail', {
+      project: request.projectName,
+      description: tm(`unityCapabilityDesc_${request.id}`),
+      count: request.toolNames.length
+    }),
+    buttons: [tm('unityCapabilityAllowOnce'), tm('unityCapabilityAlwaysAllow'), tm('unityCapabilityDeny')],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true
+  };
+  const result = window ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
+  return result.response === 0 ? 'once' : result.response === 1 ? 'always' : 'deny';
 }
 
 async function maybePromptUnitySetup(providers: ProviderSummary[]): Promise<void> {
@@ -194,7 +218,7 @@ if (hasSingleInstanceLock) {
     nodeRuntime = new NodeRuntime(store);
     commander = new CommanderRuntime(store, nodeRuntime, recordLog);
     desktopCommanderProvider = new DesktopCommanderProvider(commander, recordLog);
-    unityProvider = new UnityProvider(store, recordLog);
+    unityProvider = new UnityProvider(store, recordLog, requestUnityCapability);
     providerManager = new ProviderManager(
       [desktopCommanderProvider, unityProvider],
       providers => {
@@ -312,7 +336,6 @@ ipcMain.on('window:drag-move', (event, point: { x: number; y: number }) => {
 
 ipcMain.on('window:drag-end', () => { dragOrigin = null; });
 
-ipcMain.handle('desklink:tools', () => proxy?.listTools() ?? []);
 ipcMain.handle('desklink:providers', () => providerManager?.statuses() ?? []);
 ipcMain.handle('desklink:unity-refresh', () => unityProvider?.refreshNow() ?? null);
 ipcMain.handle('desklink:unity-install', (_event, projectPath?: string) =>
@@ -321,6 +344,8 @@ ipcMain.handle('desklink:unity-start', (_event, projectPath?: string) =>
   unityProvider?.startCurrentProject(projectPath) ?? null);
 ipcMain.handle('desklink:unity-mode', (_event, payload: { mode: UnityProjectMode; projectPath?: string }) =>
   unityProvider?.setProjectMode(payload.mode, payload.projectPath) ?? null);
+ipcMain.handle('desklink:unity-capability-mode', (_event, payload: { id: UnityCapabilityId; mode: UnityCapabilityMode }) =>
+  unityProvider?.setCapabilityMode(payload.id, payload.mode) ?? null);
 ipcMain.handle('desklink:app-version', () => app.getVersion());
 ipcMain.handle('desklink:app-update', async () => {
   try {

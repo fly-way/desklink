@@ -17,6 +17,12 @@ export type ToolSummary = {
 export type ProviderMode = 'always' | 'auto' | 'manual' | 'disabled';
 export type ProviderPhase = 'idle' | 'starting' | 'ready' | 'error';
 
+export type UnityCapabilityMode = 'on' | 'ask' | 'off';
+export type UnityCapabilityId =
+  | 'animation' | 'testing' | 'build' | 'profiler'
+  | 'graphics' | 'ui' | 'vfx' | 'probuilder'
+  | 'packages' | 'scripting' | 'generative' | 'advanced' | 'raw';
+
 export type ProviderSummary = {
   id: string;
   name: string;

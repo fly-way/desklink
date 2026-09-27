@@ -18,8 +18,9 @@ Today DeskLink ships with two built-in providers:
 - **Unity Editor integration** — detects running Unity projects and can install and manage the pinned `MCP for Unity` integration per project.
 - **Provider lifecycle management** — Unity projects support **Auto**, **Manual**, and **Disabled** modes.
 - **Dynamic capability routing** — tools appear only when their provider is ready; provider failures are isolated from other providers.
+- **Context-aware Unity exposure** — high-frequency Unity tools stay visible while optional capability groups use **On / Ask / Off** exposure to reduce the model's tool-schema context.
 - **Official OpenAI tunnel** — uses OpenAI `tunnel-client`; only an outbound connection is required.
-- **Full MCP passthrough** — preserves tool schemas and forwards `tools/call`, `resources/list`, and `resources/read`.
+- **Schema-preserving MCP routing** — exposed tools keep their upstream schemas while DeskLink forwards `tools/call`, `resources/list`, and `resources/read`.
 - **Modern + legacy MCP support** — serves the modern `2026-07-28` request envelope and legacy stateless `initialize` clients.
 - **Control-plane-aware health** — "Ready" means a real OpenAI control-plane poll succeeded, not merely that the local daemon is alive.
 - **Secure credentials** — Runtime API Keys are sealed with **Windows DPAPI** and never stored in plaintext.
@@ -61,6 +62,8 @@ DeskLink binds local endpoints to loopback only.
 
 The gateway merges the currently active providers into one tool registry. If one provider fails, healthy providers remain available.
 
+The **Providers** page is also the operator surface for provider-specific capabilities. Desktop Commander shows its current and latest versions, update status, update actions, and a read-only **AI Capabilities…** view grouped by files/editing, search, terminal sessions, processes, configuration, history/diagnostics, and assistance. Unity uses the same page for its **AI Capabilities…** exposure controls. There is no separate Tools page in the UI.
+
 ## Unity integration
 
 DeskLink currently pins **MCP for Unity 10.2.0**.
@@ -92,6 +95,12 @@ It does **not** reimplement Unity automation. It only controls the upstream MCP 
 - **Disabled** — do not start the Unity provider for that project.
 
 DeskLink also reconnects the Unity stdio provider after Editor domain reloads or temporary bridge changes.
+
+### Unity AI capability exposure
+
+DeskLink keeps a small high-frequency Unity core visible and groups lower-frequency upstream tools behind per-capability **On / Ask / Off** controls. The Unity Provider page stays compact: open **AI Capabilities…** to see the full capability list, descriptions, and controls. Core capability groups are listed there as always-on and read-only. **On** exposes an optional group's real MCP tools, **Ask** hides their schemas and exposes them only through the small `unity_capabilities` request tool, and **Off** hides the group completely. `unity_capabilities` itself is omitted when no capability is in Ask mode.
+
+Optional groups default to **Ask**; **Raw MCP** defaults to **Off** and restores the complete upstream tool surface for debugging. An Ask request can be allowed for the current Unity session, always allowed, or denied. Changing a mode rebuilds DeskLink's tool registry immediately, so subsequent `tools/list` requests see the new surface without restarting the provider.
 
 ### Verified Unity capabilities
 
