@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, screen, Tray } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, screen, shell, Tray } from 'electron';
 import path from 'node:path';
 import { CommanderRuntime } from './commander.js';
 import { McpProxy } from './mcp-proxy.js';
@@ -35,6 +35,9 @@ let providerManager: ProviderManager | null = null;
 const unityPromptedSessions = new Set<string>();
 let unityPromptInFlight = false;
 const logBuffer: string[] = [];
+const CHATGPT_PLUGIN_SETTINGS_URL = 'https://chatgpt.com/settings/plugins-settings/';
+let unityToolCount: number | null = null;
+let unityToolRefreshPromptQueue: Promise<void> = Promise.resolve();
 
 function rendererPath(): string {
   return path.join(__dirname, '..', '..', 'src', 'renderer', 'index.html');
@@ -87,6 +90,51 @@ async function requestUnityCapability(request: UnityCapabilityRequest): Promise<
   };
   const result = window ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
   return result.response === 0 ? 'once' : result.response === 1 ? 'always' : 'deny';
+}
+
+async function showChatGPTToolRefreshPrompt(payload: { previous: number; current: number }): Promise<boolean> {
+  if (payload.previous === payload.current) return false;
+
+  const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  const options: Electron.MessageBoxOptions = {
+    type: 'info',
+    title: tm('unityToolsRefreshTitle'),
+    message: tm('unityToolsRefreshMessage'),
+    detail: tm('unityToolsRefreshDetail', { previous: payload.previous, current: payload.current }),
+    buttons: [tm('unityToolsRefreshOpen'), tm('unityToolsRefreshLater')],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true
+  };
+  const result = window && window.isVisible() && !window.isMinimized()
+    ? await dialog.showMessageBox(window, options)
+    : await dialog.showMessageBox(options);
+  if (result.response !== 0) return false;
+  await shell.openExternal(CHATGPT_PLUGIN_SETTINGS_URL);
+  return true;
+}
+
+function queueChatGPTToolRefreshPrompt(payload: { previous: number; current: number }): void {
+  if (isQuitting) return;
+  unityToolRefreshPromptQueue = unityToolRefreshPromptQueue
+    .then(async () => { await showChatGPTToolRefreshPrompt(payload); })
+    .catch(error => recordLog(`ChatGPT tool refresh prompt failed: ${String(error?.message ?? error)}\n`));
+}
+
+function trackUnityToolCount(providers: ProviderSummary[]): void {
+  const unity = providers.find(provider => provider.id === 'unity');
+  if (!unity) return;
+
+  const current = Math.max(0, Number(unity.toolCount) || 0);
+  if (unityToolCount === null) {
+    unityToolCount = current;
+    return;
+  }
+  if (current === unityToolCount) return;
+
+  const previous = unityToolCount;
+  unityToolCount = current;
+  if (!isQuitting) queueChatGPTToolRefreshPrompt({ previous, current });
 }
 
 async function maybePromptUnitySetup(providers: ProviderSummary[]): Promise<void> {
@@ -223,6 +271,7 @@ if (hasSingleInstanceLock) {
       [desktopCommanderProvider, unityProvider],
       providers => {
         broadcast('desklink:providers', providers);
+        trackUnityToolCount(providers);
         proxy?.pushStatus();
         void maybePromptUnitySetup(providers);
       },
