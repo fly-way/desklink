@@ -38,6 +38,8 @@ import {
 
 const DISCOVERY_INTERVAL_MS = 5000;
 const BRIDGE_RECONNECT_MISSES = 3;
+const BRIDGE_READY_WAIT_MS = 15000;
+const BRIDGE_READY_POLL_MS = 250;
 function samePath(a: string, b: string): boolean {
   const normalize = (value: string) => {
     const cleaned = value.replace(/[\\/]+$/, '');
@@ -171,7 +173,48 @@ export class UnityProvider implements McpProvider {
   async callTool(params: { name: string; arguments?: Record<string, unknown> }): Promise<CallToolResult> {
     if (!this.client || this.phase !== 'ready') throw new Error('Unity MCP is not ready.');
     if (params.name === 'unity_capabilities') return this.requestOptionalCapability(params.arguments);
-    return await this.client.callTool(params as any) as any;
+
+    if (this.activeProject) {
+      const bridgeReady = await this.ensureBridgeReady(this.activeProject);
+      if (!bridgeReady || !this.client || this.phase !== 'ready') {
+        throw new Error('Unity MCP Editor bridge is not ready.');
+      }
+    }
+
+    const client = this.client;
+    try {
+      const result = await client.callTool(params as any) as any;
+      if (!this.activeProject || !this.hasMissingEditorInstanceSignal(result)) return result;
+      if (!await this.ensureBridgeReady(this.activeProject) || !this.client) return result;
+      return await this.client.callTool(params as any) as any;
+    } catch (error) {
+      if (!this.activeProject || !this.hasMissingEditorInstanceSignal(error)) throw error;
+      if (!await this.ensureBridgeReady(this.activeProject) || !this.client) throw error;
+      return await this.client.callTool(params as any) as any;
+    }
+  }
+
+  private async ensureBridgeReady(
+    project: UnityProjectInfo,
+    timeoutMs = BRIDGE_READY_WAIT_MS,
+    pollMs = BRIDGE_READY_POLL_MS
+  ): Promise<boolean> {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    while (true) {
+      if (await this.probeBridge(project)) return true;
+      if (Date.now() >= deadline) return false;
+      await new Promise<void>(resolve => setTimeout(resolve, Math.max(10, pollMs)));
+    }
+  }
+
+  private hasMissingEditorInstanceSignal(value: unknown): boolean {
+    const needle = 'No Unity Editor instances found';
+    if (value instanceof Error) return value.message.includes(needle);
+    try {
+      return JSON.stringify(value).includes(needle);
+    } catch {
+      return false;
+    }
   }
 
   setCapabilityMode(id: UnityCapabilityId, mode: UnityCapabilityMode): ProviderStatus {
@@ -402,17 +445,21 @@ export class UnityProvider implements McpProvider {
       }
 
       if (this.client) {
+        const wasReady = this.phase === 'ready';
         const connected = await this.probeBridge(next);
         this.bridgeMisses = connected ? 0 : this.bridgeMisses + 1;
 
-        if (connected !== this.bridgeConnected) {
-          this.bridgeConnected = connected;
-          this.phase = connected ? 'ready' : 'starting';
-          this.detail = connected ? '' : 'Unity MCP server is ready; waiting for the Editor bridge.';
-          this.onChange();
+        if (connected) {
+          const changed = !this.bridgeConnected || this.phase !== 'ready' || this.detail !== '';
+          this.bridgeConnected = true;
+          this.phase = 'ready';
+          this.detail = '';
+          if (changed) this.onChange();
+          return;
         }
 
-        if (!connected && this.bridgeMisses >= BRIDGE_RECONNECT_MISSES) {
+        this.bridgeConnected = false;
+        if (this.bridgeMisses >= BRIDGE_RECONNECT_MISSES) {
           this.onLog('Unity MCP Editor bridge was lost; restarting the stdio provider.\n');
           this.bridgeMisses = 0;
           this.generation++;
@@ -421,6 +468,17 @@ export class UnityProvider implements McpProvider {
           this.detail = 'Reconnecting Unity MCP after the Editor bridge changed…';
           this.onChange();
           void this.connectProject(next);
+          return;
+        }
+
+        const detail = wasReady
+          ? `Unity Editor bridge probe missed (${this.bridgeMisses}/${BRIDGE_RECONNECT_MISSES}); keeping existing tool routes while retrying.`
+          : 'Unity MCP server is ready; waiting for the Editor bridge.';
+        const phase = wasReady ? 'ready' : 'starting';
+        if (this.phase !== phase || this.detail !== detail) {
+          this.phase = phase;
+          this.detail = detail;
+          this.onChange();
         }
         return;
       }
@@ -517,7 +575,7 @@ export class UnityProvider implements McpProvider {
         return false;
       }
 
-      if (instanceId !== this.activeInstanceId && this.tools.some(tool => tool.name === 'set_active_instance')) {
+      if (this.tools.some(tool => tool.name === 'set_active_instance')) {
         await this.client.callTool({
           name: 'set_active_instance',
           arguments: { instance: instanceId }
