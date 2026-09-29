@@ -4,6 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const {
+  applyUnityMcpCompatibilityPatches,
   inspectUnityMcpPackage,
   installUnityMcpPackage
 } = require('../dist/main/providers/unity/unity-package.js');
@@ -82,4 +83,28 @@ test('reports installed only after Unity resolves and imports the package', t =>
   assert.equal(status.installed, true);
   assert.equal(status.version, UNITY_MCP_VERSION);
   assert.equal(status.packagePath, cache);
+});
+
+
+test('applies the bundled manage_ui compatibility patch idempotently', t => {
+  const root = makeProject(t);
+  installUnityMcpPackage(root);
+
+  const cache = path.join(root, 'Library', 'PackageCache', UNITY_MCP_PACKAGE + '@abc123');
+  const tools = path.join(cache, 'Editor', 'Tools');
+  fs.mkdirSync(tools, { recursive: true });
+  fs.writeFileSync(path.join(cache, 'package.json'), JSON.stringify({
+    name: UNITY_MCP_PACKAGE,
+    version: UNITY_MCP_VERSION
+  }));
+  fs.writeFileSync(path.join(tools, 'ManageUI.cs'), '// upstream placeholder\n');
+
+  const status = inspectUnityMcpPackage(root);
+  const first = applyUnityMcpCompatibilityPatches(status);
+  const patched = fs.readFileSync(path.join(tools, 'ManageUI.cs'), 'utf8');
+  const second = applyUnityMcpCompatibilityPatches(status);
+
+  assert.equal(first.changed, true);
+  assert.match(patched, /DeskLink manage_ui compatibility patch: v1/);
+  assert.equal(second.changed, false);
 });

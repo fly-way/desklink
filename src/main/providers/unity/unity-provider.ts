@@ -12,7 +12,7 @@ import type { Store, UnityProjectMode } from '../../store.js';
 import type { UnityCapabilityId, UnityCapabilityMode } from '../../../shared/types.js';
 import type { McpProvider, ProviderStatus } from '../provider.js';
 import { discoverUnityProjects, type UnityProjectInfo } from './unity-discovery.js';
-import { inspectUnityMcpPackage, installUnityMcpPackage, type UnityMcpPackageStatus } from './unity-package.js';
+import { applyUnityMcpCompatibilityPatches, inspectUnityMcpPackage, installUnityMcpPackage, type UnityMcpPackageStatus } from './unity-package.js';
 import {
   UNITY_MCP_INSTANCES_URI,
   UNITY_MCP_PYPI_SPEC,
@@ -167,13 +167,31 @@ export class UnityProvider implements McpProvider {
   }
 
   listTools(): Tool[] {
-    return selectUnityTools(this.tools, capability => this.capabilityMode(capability), this.temporaryCapabilities);
+    const selected = selectUnityTools(
+      this.tools,
+      capability => this.capabilityMode(capability),
+      this.temporaryCapabilities
+    );
+    return selected.map(tool => {
+      if (tool.name !== 'manage_ui' || !tool.description) return tool;
+      const description = tool.description
+        .replace(
+          /- In play mode: first call queues a WaitForEndOfFrame screen capture and returns pending=true;\s*call render_ui a second time to retrieve the saved PNG \(hasContent will be true\)\./,
+          '- In play mode: render_ui completes in one call and saves the composited frame (hasContent=true).'
+        )
+        .replace(
+          '- In editor mode: assigns a RenderTexture to PanelSettings (best-effort; may stay blank).',
+          '- In editor mode: the first call may prime a temporary RenderTexture and a second call can read it; the original PanelSettings targetTexture is restored and temporary assets are cleaned up.'
+        );
+      return { ...tool, description };
+    });
   }
 
   async callTool(params: { name: string; arguments?: Record<string, unknown> }): Promise<CallToolResult> {
     if (!this.client || this.phase !== 'ready') throw new Error('Unity MCP is not ready.');
     if (params.name === 'unity_capabilities') return this.requestOptionalCapability(params.arguments);
 
+    const prepared = params;
     if (this.activeProject) {
       const bridgeReady = await this.ensureBridgeReady(this.activeProject);
       if (!bridgeReady || !this.client || this.phase !== 'ready') {
@@ -183,14 +201,22 @@ export class UnityProvider implements McpProvider {
 
     const client = this.client;
     try {
-      const result = await client.callTool(params as any) as any;
-      if (!this.activeProject || !this.hasMissingEditorInstanceSignal(result)) return result;
-      if (!await this.ensureBridgeReady(this.activeProject) || !this.client) return result;
-      return await this.client.callTool(params as any) as any;
+      const result = await client.callTool(prepared as any) as any;
+      const retryable = this.hasMissingEditorInstanceSignal(result)
+        || (this.canRetryTransientToolCall(prepared) && this.hasTransientEditorBridgeSignal(result));
+      if (!this.activeProject || !retryable) return this.postprocessToolResult(prepared, result);
+      if (!await this.ensureBridgeReady(this.activeProject) || !this.client) {
+        return this.postprocessToolResult(prepared, result);
+      }
+      const retried = await this.client.callTool(prepared as any) as any;
+      return this.postprocessToolResult(prepared, retried);
     } catch (error) {
-      if (!this.activeProject || !this.hasMissingEditorInstanceSignal(error)) throw error;
+      const retryable = this.hasMissingEditorInstanceSignal(error)
+        || (this.canRetryTransientToolCall(prepared) && this.hasTransientEditorBridgeSignal(error));
+      if (!this.activeProject || !retryable) throw error;
       if (!await this.ensureBridgeReady(this.activeProject) || !this.client) throw error;
-      return await this.client.callTool(params as any) as any;
+      const retried = await this.client.callTool(prepared as any) as any;
+      return this.postprocessToolResult(prepared, retried);
     }
   }
 
@@ -215,6 +241,54 @@ export class UnityProvider implements McpProvider {
     } catch {
       return false;
     }
+  }
+
+  private hasTransientEditorBridgeSignal(value: unknown): boolean {
+    const needles = [
+      'Connection closed before reading expected bytes',
+      'Read timed out',
+      'ECONNRESET',
+      'socket hang up',
+      'broken pipe'
+    ];
+    const text = value instanceof Error
+      ? value.message
+      : (() => {
+          try { return JSON.stringify(value); } catch { return ''; }
+        })();
+    return needles.some(needle => text.toLowerCase().includes(needle.toLowerCase()));
+  }
+
+  private canRetryTransientToolCall(params: { name: string; arguments?: Record<string, unknown> }): boolean {
+    if (params.name !== 'manage_ui') return false;
+    const action = String(params.arguments?.action ?? '').toLowerCase();
+    return ['ping', 'read', 'list', 'get_visual_tree', 'link_stylesheet'].includes(action);
+  }
+
+  private postprocessToolResult(
+    params: { name: string; arguments?: Record<string, unknown> },
+    result: any
+  ): any {
+    if (params.name !== 'manage_ui') return result;
+    const action = String(params.arguments?.action ?? '').toLowerCase();
+    if (action !== 'list') return result;
+
+    const assets = result?.structuredContent?.data?.assets;
+    if (!Array.isArray(assets)) return result;
+
+    const filtered = assets.filter((asset: any) => {
+      const type = String(asset?.type ?? '').toLowerCase();
+      const assetPath = String(asset?.path ?? '').toLowerCase();
+      if (type === 'uss') return assetPath.endsWith('.uss');
+      if (type === 'uxml') return assetPath.endsWith('.uxml');
+      return true;
+    });
+    const removed = assets.length - filtered.length;
+    result.structuredContent.data.assets = filtered;
+    if (removed > 0 && typeof result.structuredContent.data.total === 'number') {
+      result.structuredContent.data.total = Math.max(0, result.structuredContent.data.total - removed);
+    }
+    return result;
   }
 
   setCapabilityMode(id: UnityCapabilityId, mode: UnityCapabilityMode): ProviderStatus {
@@ -421,6 +495,21 @@ export class UnityProvider implements McpProvider {
           : `MCP for Unity version could not be verified; DeskLink requires ${UNITY_MCP_VERSION}.`;
         this.onChange();
         return;
+      }
+
+      try {
+        const compatibilityPatch = applyUnityMcpCompatibilityPatches(this.packageStatus);
+        if (compatibilityPatch.changed) {
+          this.onLog('Applied DeskLink manage_ui compatibility patch to MCP for Unity.\n');
+          this.generation++;
+          await this.closeRuntime();
+          this.phase = 'starting';
+          this.detail = 'Applied Unity manage_ui compatibility patch; waiting for Unity to reload.';
+          this.onChange();
+          return;
+        }
+      } catch (error: any) {
+        this.onLog(`Unity manage_ui compatibility patch failed: ${String(error?.message ?? error)}\n`);
       }
 
       const integration = inspectDeskLinkUnityBootstrap(next.projectPath);

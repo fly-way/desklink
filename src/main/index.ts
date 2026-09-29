@@ -13,9 +13,10 @@ import { UnityProvider } from './providers/unity/unity-provider.js';
 import type { UnityCapabilityDecision, UnityCapabilityRequest } from './providers/unity/unity-capabilities.js';
 import { Store, type UnityProjectMode } from './store.js';
 import { TunnelRuntime } from './tunnel.js';
+import { createDownloadProgressMeter, parseContentLength } from './update-progress.js';
 import { setLocale, tm } from './i18n.js';
 import type {
-  ProviderSummary, ProxyStatus, TunnelStatus, UnityCapabilityId, UnityCapabilityMode
+  DeskLinkUpdateProgress, ProviderSummary, ProxyStatus, TunnelStatus, UnityCapabilityId, UnityCapabilityMode
 } from '../shared/types.js';
 
 // Runtime state (config, DPAPI key, tunnel-client) must live outside the read-only asar.
@@ -58,6 +59,10 @@ function rendererPath(): string {
 
 function broadcast(channel: string, payload: unknown): void {
   for (const window of BrowserWindow.getAllWindows()) window.webContents.send(channel, payload);
+}
+
+function broadcastDeskLinkUpdateProgress(progress: DeskLinkUpdateProgress): void {
+  broadcast('desklink:app-update-progress', progress);
 }
 
 function showMainWindow(): void {
@@ -131,10 +136,22 @@ async function getDeskLinkUpdateInfo(): Promise<DeskLinkUpdateInfo & { installer
 }
 
 async function downloadAndLaunchDeskLinkUpdate(): Promise<{ started?: boolean; version?: string; error?: string }> {
+  broadcastDeskLinkUpdateProgress({ phase: 'checking' });
   const update = await getDeskLinkUpdateInfo();
-  if (update.error) return { error: update.error };
-  if (!update.available) return { error: `DeskLink ${update.current} is already up to date.` };
-  if (!update.installerUrl || !update.installerName) return { error: 'The latest GitHub release has no Windows installer asset.' };
+  if (update.error) {
+    broadcastDeskLinkUpdateProgress({ phase: 'error', error: update.error });
+    return { error: update.error };
+  }
+  if (!update.available) {
+    const error = `DeskLink ${update.current} is already up to date.`;
+    broadcastDeskLinkUpdateProgress({ phase: 'error', version: update.latest || update.current, error });
+    return { error };
+  }
+  if (!update.installerUrl || !update.installerName) {
+    const error = 'The latest GitHub release has no Windows installer asset.';
+    broadcastDeskLinkUpdateProgress({ phase: 'error', version: update.latest, error });
+    return { error };
+  }
 
   try {
     const updateDir = path.join(app.getPath('temp'), 'DeskLink-update');
@@ -148,14 +165,44 @@ async function downloadAndLaunchDeskLinkUpdate(): Promise<{ started?: boolean; v
       signal: AbortSignal.timeout(10 * 60 * 1000)
     });
     if (!response.ok || !response.body) throw new Error(`Download HTTP ${response.status}`);
-    await pipeline(Readable.fromWeb(response.body as any), createWriteStream(installerPath));
+
+    const totalBytes = parseContentLength(response.headers.get('content-length'));
+
+    broadcastDeskLinkUpdateProgress({
+      phase: 'downloading',
+      version: update.latest,
+      percent: totalBytes ? 0 : undefined,
+      downloadedBytes: 0,
+      totalBytes
+    });
+
+    const meter = createDownloadProgressMeter(totalBytes, progress => {
+      broadcastDeskLinkUpdateProgress({
+        phase: 'downloading',
+        version: update.latest,
+        ...progress
+      });
+    });
+
+    await pipeline(Readable.fromWeb(response.body as any), meter.stream, createWriteStream(installerPath));
+    const downloadedBytes = meter.downloadedBytes();
+    broadcastDeskLinkUpdateProgress({
+      phase: 'downloading',
+      version: update.latest,
+      percent: 100,
+      downloadedBytes,
+      totalBytes: totalBytes ?? downloadedBytes
+    });
+    broadcastDeskLinkUpdateProgress({ phase: 'launching', version: update.latest, percent: 100 });
 
     const launchError = await shell.openPath(installerPath);
     if (launchError) throw new Error(launchError);
     setTimeout(() => app.quit(), 750);
     return { started: true, version: update.latest };
   } catch (error: any) {
-    return { error: String(error?.message ?? error) };
+    const message = String(error?.message ?? error);
+    broadcastDeskLinkUpdateProgress({ phase: 'error', version: update.latest, error: message });
+    return { error: message };
   }
 }
 

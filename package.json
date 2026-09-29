@@ -1,6 +1,6 @@
 {
   "name": "desklink",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "private": true,
   "description": "Windows MCP gateway that securely connects ChatGPT to local tools and desktop applications over OpenAI Secure MCP Tunnel",
   "main": "dist/main/index.js",
@@ -21,6 +21,7 @@
       "dist/**/*",
       "src/renderer/**/*",
       "build/icon.ico",
+      "tools/unity/ManageUI.cs",
       "package.json"
     ],
     "directories": {

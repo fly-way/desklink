@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
-  ProviderSummary, ProxyStatus, TunnelStatus, UnityCapabilityId, UnityCapabilityMode
+  DeskLinkUpdateProgress, ProviderSummary, ProxyStatus, TunnelStatus, UnityCapabilityId, UnityCapabilityMode
 } from '../shared/types.js';
 
 contextBridge.exposeInMainWorld('desklink', {
@@ -30,6 +30,11 @@ contextBridge.exposeInMainWorld('desklink', {
     const handler = (_event: unknown, status: TunnelStatus) => listener(status);
     ipcRenderer.on('desklink:tunnel', handler);
     return () => ipcRenderer.removeListener('desklink:tunnel', handler);
+  },
+  onAppUpdateProgress: (listener: (progress: DeskLinkUpdateProgress) => void) => {
+    const handler = (_event: unknown, progress: DeskLinkUpdateProgress) => listener(progress);
+    ipcRenderer.on('desklink:app-update-progress', handler);
+    return () => ipcRenderer.removeListener('desklink:app-update-progress', handler);
   },
   onLog: (listener: (line: string) => void) => {
     const handler = (_event: unknown, line: string) => listener(line);

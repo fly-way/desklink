@@ -36,6 +36,77 @@ let proxyDraft = '';
 let appVersion = '';
 /** Latest DeskLink release info returned by the main process. */
 let appUpdateInfo = null;
+/** Live DeskLink updater state pushed by the main process while downloading/installing. */
+let appUpdateProgress = null;
+
+function formatBytes(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes < 1024) return bytes + ' B';
+  const units = ['KB', 'MB', 'GB'];
+  let size = bytes / 1024;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index++;
+  }
+  return (size >= 100 ? size.toFixed(0) : size >= 10 ? size.toFixed(1) : size.toFixed(2)) + ' ' + units[index];
+}
+
+function isAppUpdateBusy() {
+  return ['checking', 'downloading', 'launching'].includes(appUpdateProgress?.phase);
+}
+
+function renderAppUpdateProgress() {
+  if (!appUpdateProgress) return null;
+
+  const box = el('div', 'app-update-progress');
+  const phase = appUpdateProgress.phase;
+  const percent = Number.isFinite(appUpdateProgress.percent)
+    ? Math.max(0, Math.min(100, Math.round(appUpdateProgress.percent)))
+    : null;
+
+  let label = '';
+  if (phase === 'checking') label = t('appUpdateProgressChecking');
+  else if (phase === 'downloading' && percent !== null) {
+    label = tl('appUpdateProgressDownloading', { percent });
+  } else if (phase === 'downloading') {
+    label = tl('appUpdateProgressDownloadingUnknown', {
+      downloaded: formatBytes(appUpdateProgress.downloadedBytes)
+    });
+  } else if (phase === 'launching') label = t('appUpdateProgressLaunching');
+  else if (phase === 'error') {
+    label = tl('appUpdateProgressFailed', { message: appUpdateProgress.error || t('failed') });
+    box.classList.add('is-error');
+  }
+
+  const head = el('div', 'app-update-progress-head');
+  head.append(el('span', 'app-update-progress-label', label));
+  if (phase === 'downloading' && percent !== null) {
+    head.append(el('span', 'app-update-progress-percent', percent + '%'));
+  }
+  box.append(head);
+
+  if (phase !== 'error') {
+    const track = el('div', 'app-update-progress-track');
+    const bar = el('div', 'app-update-progress-bar');
+    if (percent === null && phase !== 'launching') {
+      track.classList.add('is-indeterminate');
+    } else {
+      bar.style.width = (phase === 'launching' ? 100 : (percent ?? 0)) + '%';
+    }
+    track.append(bar);
+    box.append(track);
+  }
+
+  if (phase === 'downloading' && appUpdateProgress.totalBytes > 0) {
+    box.append(el('div', 'app-update-progress-meta', tl('appUpdateProgressBytes', {
+      downloaded: formatBytes(appUpdateProgress.downloadedBytes),
+      total: formatBytes(appUpdateProgress.totalBytes)
+    })));
+  }
+
+  return box;
+}
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -666,6 +737,7 @@ function refreshStrings() {
 }
 
 async function checkDesklinkUpdate() {
+  appUpdateProgress = null;
   const r = await bridge.checkAppUpdate();
   if (r?.error) {
     appUpdateInfo = null;
@@ -679,6 +751,8 @@ async function checkDesklinkUpdate() {
 }
 
 async function installDesklinkUpdate() {
+  appUpdateProgress = { phase: 'checking', version: appUpdateInfo?.latest || '' };
+  if (current === 'settings') show('settings');
   const result = await bridge.installAppUpdate();
   if (result?.error) throw new Error(result.error);
   return tl('appUpdateStarting', { version: result?.version || appUpdateInfo?.latest || '?' });
@@ -747,11 +821,13 @@ function renderSettings() {
   }, t('checking')));
   if (appUpdateInfo?.available) {
     const update = button(t('installAppUpdate'), installDesklinkUpdate, t('appUpdateDownloading'));
-    update.disabled = !appUpdateInfo.installerName;
+    update.disabled = !appUpdateInfo.installerName || isAppUpdateBusy();
     bar.append(update);
     if (!appUpdateInfo.installerName) bar.append(el('span', 'muted', t('appUpdateInstallerMissing')));
   }
   wrap.append(bar);
+  const updateProgress = renderAppUpdateProgress();
+  if (updateProgress) wrap.append(updateProgress);
   return wrap;
 }
 
@@ -879,6 +955,10 @@ bridge.onTunnel(next => {
   updateTitleStatus();
   if (isTyping()) return;
   if (current === 'tunnel' || current === 'overview' || current === 'diagnostics') show(current);
+});
+bridge.onAppUpdateProgress?.(next => {
+  appUpdateProgress = next;
+  if (current === 'settings') show('settings');
 });
 bridge.onLog(line => {
   logs += line;

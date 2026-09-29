@@ -170,3 +170,126 @@ test('waits through transient Unity bridge loss before allowing a tool call', as
   assert.equal(probes, 3);
   assert.deepEqual(calls, []);
 });
+
+
+test('retries safe manage_ui actions once after a transient bridge read failure', async () => {
+  const provider = createProvider();
+  let selections = 0;
+  let operations = 0;
+  attachFakeClient(provider, async params => {
+    if (params.name === 'set_active_instance') {
+      selections++;
+      return { content: [] };
+    }
+    operations++;
+    if (operations === 1) {
+      return {
+        content: [{ type: 'text', text: 'Connection closed before reading expected bytes' }],
+        structuredContent: { success: false, error: 'Connection closed before reading expected bytes' }
+      };
+    }
+    return { content: [], structuredContent: { success: true } };
+  });
+
+  const result = await provider.callTool({
+    name: 'manage_ui',
+    arguments: { action: 'link_stylesheet' }
+  });
+
+  assert.equal(operations, 2);
+  assert.equal(selections, 2);
+  assert.equal(result.structuredContent.success, true);
+});
+
+test('does not retry non-idempotent manage_ui actions after a transient bridge failure', async () => {
+  const provider = createProvider();
+  let operations = 0;
+  attachFakeClient(provider, async params => {
+    if (params.name === 'set_active_instance') return { content: [] };
+    operations++;
+    return {
+      content: [{ type: 'text', text: 'Connection closed before reading expected bytes' }],
+      structuredContent: { success: false, error: 'Connection closed before reading expected bytes' }
+    };
+  });
+
+  const result = await provider.callTool({
+    name: 'manage_ui',
+    arguments: { action: 'create' }
+  });
+
+  assert.equal(operations, 1);
+  assert.equal(result.structuredContent.success, false);
+});
+
+test('filters mislabeled UI list items', () => {
+  const provider = createProvider();
+
+  const result = provider.postprocessToolResult(
+    { name: 'manage_ui', arguments: { action: 'list' } },
+    {
+      structuredContent: {
+        success: true,
+        data: {
+          total: 3,
+          assets: [
+            { path: 'Assets/A.uxml', type: 'uxml' },
+            { path: 'Assets/A.uxml', type: 'uss' },
+            { path: 'Assets/A.uss', type: 'uss' }
+          ]
+        }
+      }
+    }
+  );
+
+  assert.equal(result.structuredContent.data.total, 2);
+  assert.deepEqual(result.structuredContent.data.assets.map(asset => asset.path), [
+    'Assets/A.uxml',
+    'Assets/A.uss'
+  ]);
+});
+
+test('forwards manage_ui screenshot_file_name without injecting unsupported arguments', async () => {
+  const provider = createProvider();
+  let forwarded;
+  attachFakeClient(provider, async params => {
+    if (params.name === 'set_active_instance') return { content: [] };
+    forwarded = params;
+    return { content: [], structuredContent: { success: true } };
+  });
+
+  await provider.callTool({
+    name: 'manage_ui',
+    arguments: {
+      action: 'render_ui',
+      screenshot_file_name: 'probe.png',
+      output_folder: 'Assets/Probe'
+    }
+  });
+
+  assert.equal(forwarded.arguments.screenshot_file_name, 'probe.png');
+  assert.equal(Object.hasOwn(forwarded.arguments, 'file_name'), false);
+});
+
+test('updates manage_ui render_ui workflow description for the patched behavior', () => {
+  const provider = createProvider();
+  provider.capabilityMode = () => 'on';
+  provider.tools = [{
+    name: 'manage_ui',
+    description: [
+      'UI Toolkit workflow:',
+      '8. Use render_ui to capture a visual preview for self-evaluation',
+      '   - In play mode: first call queues a WaitForEndOfFrame screen capture and returns pending=true;',
+      '     call render_ui a second time to retrieve the saved PNG (hasContent will be true).',
+      '   - In editor mode: assigns a RenderTexture to PanelSettings (best-effort; may stay blank).'
+    ].join('\n'),
+    inputSchema: { type: 'object', properties: {} }
+  }];
+
+  const tool = provider.listTools().find(tool => tool.name === 'manage_ui');
+
+  assert.ok(tool);
+  assert.match(tool.description, /play mode: render_ui completes in one call/);
+  assert.doesNotMatch(tool.description, /pending=true/);
+  assert.match(tool.description, /original PanelSettings targetTexture is restored/);
+});

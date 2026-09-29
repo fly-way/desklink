@@ -16,6 +16,12 @@ export type UnityMcpPackageStatus = {
   packagePath: string;
 };
 
+export type UnityMcpCompatibilityPatchResult = {
+  changed: boolean;
+  sourcePath: string;
+  targetPath: string;
+};
+
 function readJson(filePath: string): any {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
 }
@@ -81,6 +87,36 @@ export function inspectUnityMcpPackage(projectPath: string): UnityMcpPackageStat
       packagePath: ''
     };
   }
+}
+
+export function applyUnityMcpCompatibilityPatches(
+  status: UnityMcpPackageStatus
+): UnityMcpCompatibilityPatchResult {
+  const sourcePath = path.resolve(__dirname, '../../../../tools/unity/ManageUI.cs');
+  const targetPath = status.packagePath
+    ? path.join(status.packagePath, 'Editor', 'Tools', 'ManageUI.cs')
+    : '';
+
+  if (!status.installed || status.version !== UNITY_MCP_VERSION || !targetPath) {
+    return { changed: false, sourcePath, targetPath };
+  }
+  if (!fs.existsSync(sourcePath)) {
+    throw new Error(`DeskLink Unity manage_ui patch source was not found: ${sourcePath}`);
+  }
+  if (!fs.existsSync(targetPath)) {
+    throw new Error(`Installed Unity MCP ManageUI.cs was not found: ${targetPath}`);
+  }
+
+  const desired = fs.readFileSync(sourcePath, 'utf8');
+  if (!desired.includes('DeskLink manage_ui compatibility patch: v1')) {
+    throw new Error('DeskLink Unity manage_ui patch source is missing its compatibility marker.');
+  }
+
+  const current = fs.readFileSync(targetPath, 'utf8');
+  if (current === desired) return { changed: false, sourcePath, targetPath };
+
+  fs.writeFileSync(targetPath, desired, 'utf8');
+  return { changed: true, sourcePath, targetPath };
 }
 
 export function installUnityMcpPackage(projectPath: string): UnityMcpPackageStatus {

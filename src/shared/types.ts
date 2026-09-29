@@ -9,6 +9,15 @@ export type ProxyStatus = {
   commanderLatest: string;
 };
 
+export type DeskLinkUpdateProgress = {
+  phase: 'checking' | 'downloading' | 'launching' | 'error';
+  version?: string;
+  percent?: number;
+  downloadedBytes?: number;
+  totalBytes?: number;
+  error?: string;
+};
+
 export type ToolSummary = {
   name: string;
   description: string;
