@@ -1,5 +1,9 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, screen, shell, Tray } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, screen, shell, Tray } from 'electron';
+import { createWriteStream } from 'node:fs';
+import { mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { CommanderRuntime } from './commander.js';
 import { McpProxy } from './mcp-proxy.js';
 import { NodeRuntime } from './node.js';
@@ -36,6 +40,15 @@ const unityPromptedSessions = new Set<string>();
 let unityPromptInFlight = false;
 const logBuffer: string[] = [];
 const CHATGPT_PLUGIN_SETTINGS_URL = 'https://chatgpt.com/settings/plugins-settings/';
+const DESKLINK_RELEASE_API = 'https://api.github.com/repos/fly-way/desklink/releases/latest';
+type DeskLinkUpdateInfo = {
+  current: string;
+  latest: string;
+  available: boolean;
+  installerName?: string;
+  releaseUrl?: string;
+  error?: string;
+};
 let unityToolCount: number | null = null;
 let unityToolRefreshPromptQueue: Promise<void> = Promise.resolve();
 
@@ -55,6 +68,95 @@ function showMainWindow(): void {
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
+}
+
+function versionParts(value: string): number[] | null {
+  const match = String(value || '').trim().replace(/^v/i, '').match(/^(\d+(?:\.\d+)*)(?:[-+].*)?$/);
+  if (!match) return null;
+  return match[1].split('.').map(part => Number(part));
+}
+
+function isNewerVersion(candidate: string, current: string): boolean {
+  const left = versionParts(candidate);
+  const right = versionParts(current);
+  if (!left || !right) return candidate !== current;
+  const length = Math.max(left.length, right.length);
+  for (let i = 0; i < length; i++) {
+    const a = left[i] ?? 0;
+    const b = right[i] ?? 0;
+    if (a !== b) return a > b;
+  }
+  return false;
+}
+
+async function getDeskLinkUpdateInfo(): Promise<DeskLinkUpdateInfo & { installerUrl?: string }> {
+  const current = app.getVersion();
+  try {
+    const response = await net.fetch(DESKLINK_RELEASE_API, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': `DeskLink/${current}`,
+        'X-GitHub-Api-Version': '2022-11-28'
+      },
+      signal: AbortSignal.timeout(15000)
+    });
+    if (!response.ok) throw new Error(`GitHub HTTP ${response.status}`);
+
+    const release: any = await response.json();
+    const tag = String(release?.tag_name ?? '').trim();
+    const latest = tag.replace(/^v/i, '');
+    if (!versionParts(latest)) throw new Error('GitHub release has no valid version tag.');
+
+    const assets = Array.isArray(release?.assets) ? release.assets : [];
+    const expectedName = `DeskLink-Setup-${latest}.exe`.toLowerCase();
+    const installer = assets.find((asset: any) => String(asset?.name ?? '').toLowerCase() === expectedName)
+      ?? assets.find((asset: any) => /^DeskLink[- ]Setup[- ].*\.exe$/i.test(String(asset?.name ?? '')));
+
+    return {
+      current,
+      latest,
+      available: isNewerVersion(latest, current),
+      installerName: installer ? String(installer.name) : undefined,
+      installerUrl: installer ? String(installer.browser_download_url ?? '') : undefined,
+      releaseUrl: String(release?.html_url ?? '') || undefined
+    };
+  } catch (error: any) {
+    return {
+      current,
+      latest: '',
+      available: false,
+      error: String(error?.message ?? error)
+    };
+  }
+}
+
+async function downloadAndLaunchDeskLinkUpdate(): Promise<{ started?: boolean; version?: string; error?: string }> {
+  const update = await getDeskLinkUpdateInfo();
+  if (update.error) return { error: update.error };
+  if (!update.available) return { error: `DeskLink ${update.current} is already up to date.` };
+  if (!update.installerUrl || !update.installerName) return { error: 'The latest GitHub release has no Windows installer asset.' };
+
+  try {
+    const updateDir = path.join(app.getPath('temp'), 'DeskLink-update');
+    await mkdir(updateDir, { recursive: true });
+    const safeName = path.basename(update.installerName);
+    const installerPath = path.join(updateDir, safeName);
+    await rm(installerPath, { force: true });
+
+    const response = await net.fetch(update.installerUrl, {
+      headers: { 'User-Agent': `DeskLink/${app.getVersion()}` },
+      signal: AbortSignal.timeout(10 * 60 * 1000)
+    });
+    if (!response.ok || !response.body) throw new Error(`Download HTTP ${response.status}`);
+    await pipeline(Readable.fromWeb(response.body as any), createWriteStream(installerPath));
+
+    const launchError = await shell.openPath(installerPath);
+    if (launchError) throw new Error(launchError);
+    setTimeout(() => app.quit(), 750);
+    return { started: true, version: update.latest };
+  } catch (error: any) {
+    return { error: String(error?.message ?? error) };
+  }
 }
 
 function unityPromptSessionKey(provider: ProviderSummary): string {
@@ -396,18 +498,8 @@ ipcMain.handle('desklink:unity-mode', (_event, payload: { mode: UnityProjectMode
 ipcMain.handle('desklink:unity-capability-mode', (_event, payload: { id: UnityCapabilityId; mode: UnityCapabilityMode }) =>
   unityProvider?.setCapabilityMode(payload.id, payload.mode) ?? null);
 ipcMain.handle('desklink:app-version', () => app.getVersion());
-ipcMain.handle('desklink:app-update', async () => {
-  try {
-    const res = await fetch('https://registry.npmjs.org/desklink/latest', { signal: AbortSignal.timeout(8000) });
-    if (!res.ok) return { error: 'http ' + res.status };
-    const data: any = await res.json();
-    const latest = data && data.version;
-    if (!latest) return { error: 'no version' };
-    return { latest };
-  } catch (error: any) {
-    return { error: String(error?.message ?? error) };
-  }
-});
+ipcMain.handle('desklink:app-update', () => getDeskLinkUpdateInfo());
+ipcMain.handle('desklink:app-update-install', () => downloadAndLaunchDeskLinkUpdate());
 ipcMain.handle('desklink:logs', () => logBuffer.join(''));
 ipcMain.handle('desklink:dc-update', () => proxy?.checkLatest() ?? '');
 ipcMain.handle('desklink:diagnostics', async () => {

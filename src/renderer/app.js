@@ -34,6 +34,8 @@ let tunnelBusy = false;
 let proxyDraft = '';
 /** Cached DeskLink version, fetched once at startup for the Settings view. */
 let appVersion = '';
+/** Latest DeskLink release info returned by the main process. */
+let appUpdateInfo = null;
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -665,9 +667,21 @@ function refreshStrings() {
 
 async function checkDesklinkUpdate() {
   const r = await bridge.checkAppUpdate();
-  if (r?.error) return t('updateCheckFailed');
-  if (appVersion && r.latest === appVersion) return tl('updateResultLatest', { version: r.latest });
-  return tl('updateAvailableDesklink', { latest: r.latest, current: appVersion || '?' });
+  if (r?.error) {
+    appUpdateInfo = null;
+    show('settings');
+    return tl('updateCheckFailedDetail', { message: r.error });
+  }
+  appUpdateInfo = r;
+  show('settings');
+  if (!r.available) return tl('updateResultLatest', { version: r.latest || appVersion || '?' });
+  return tl('updateAvailableDesklink', { latest: r.latest, current: r.current || appVersion || '?' });
+}
+
+async function installDesklinkUpdate() {
+  const result = await bridge.installAppUpdate();
+  if (result?.error) throw new Error(result.error);
+  return tl('appUpdateStarting', { version: result?.version || appUpdateInfo?.latest || '?' });
 }
 
 function renderSettings() {
@@ -716,12 +730,27 @@ function renderSettings() {
   // About
   const aboutRows = el('div', 'rows');
   aboutRows.append(row(t('desklinkVersion'), appVersion || '—', true));
+  if (appUpdateInfo?.latest) {
+    aboutRows.append(row(t('desklinkLatestVersion'), appUpdateInfo.latest, true));
+    aboutRows.append(row(
+      t('rowUpdate'),
+      appUpdateInfo.available
+        ? tl('updateAvailableDesklink', { latest: appUpdateInfo.latest, current: appUpdateInfo.current || appVersion || '?' })
+        : t('upToDate')
+    ));
+  }
   wrap.append(section(t('aboutDesklink'), aboutRows));
 
   const bar = el('div', 'toolbar');
   bar.append(button(t('checkAppUpdate'), async () => {
     return await checkDesklinkUpdate();
   }, t('checking')));
+  if (appUpdateInfo?.available) {
+    const update = button(t('installAppUpdate'), installDesklinkUpdate, t('appUpdateDownloading'));
+    update.disabled = !appUpdateInfo.installerName;
+    bar.append(update);
+    if (!appUpdateInfo.installerName) bar.append(el('span', 'muted', t('appUpdateInstallerMissing')));
+  }
   wrap.append(bar);
   return wrap;
 }

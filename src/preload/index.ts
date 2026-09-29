@@ -48,7 +48,10 @@ contextBridge.exposeInMainWorld('desklink', {
     ipcRenderer.invoke('desklink:unity-capability-mode', { id, mode }),
   getLogs: (): Promise<string> => ipcRenderer.invoke('desklink:logs'),
   appVersion: (): Promise<string> => ipcRenderer.invoke('desklink:app-version'),
-  checkAppUpdate: (): Promise<{ latest?: string; error?: string }> => ipcRenderer.invoke('desklink:app-update'),
+  checkAppUpdate: (): Promise<{ current: string; latest: string; available: boolean; installerName?: string; releaseUrl?: string; error?: string }> =>
+    ipcRenderer.invoke('desklink:app-update'),
+  installAppUpdate: (): Promise<{ started?: boolean; version?: string; error?: string }> =>
+    ipcRenderer.invoke('desklink:app-update-install'),
   restart: (): Promise<boolean> => ipcRenderer.invoke('desklink:restart'),
   checkCommanderUpdate: (): Promise<string> => ipcRenderer.invoke('desklink:dc-update'),
   nodeStatus: (): Promise<any> => ipcRenderer.invoke('desklink:node-status'),
